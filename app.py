@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import os
 import logging
-
+import pdb
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ if uploaded_image:
 
         with st.spinner("Uploading to Azure..."):
             try:
+                pdb.set_trace() 
                 logger.info(f"Uploading {uploaded_image.name} to Azure Function...")
                 response = requests.post(AZURE_FUNCTION_URL, files=files, headers=headers)
 

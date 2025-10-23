@@ -1,139 +1,107 @@
 import logging
-import json
+import azure.functions as func
 import os
-import base64 # NEW: For Base64 decoding
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
 from datetime import datetime, timedelta
-# from io import BytesIO # No longer needed if we correctly handle raw bytes vs. Base64
+from io import BytesIO
+import json
 import traceback
-import magic 
 
-# --- Read environment variables ---
-BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
-BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME")
+# --- Setup logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- Initialize Blob client (Error handling refined) ---
-if not BLOB_CONNECTION_STRING:
-    raise ValueError("BLOB_CONNECTION_STRING environment variable is not set.")
-try:
-    blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-    container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
-except Exception as e:
-    logging.error(f"Error initializing BlobServiceClient: {e}")
-    raise
-
-# Define accepted image types
-ACCEPTED_IMAGE_TYPES = {
-    'image/jpeg': ['.jpg', '.jpeg'],
-    'image/png': ['.png']
-}
-
-def get_file_type_info(file_bytes):
-    """Uses 'magic' to determine file type."""
-    try:
-        mime = magic.from_buffer(file_bytes, mime=True)
-        if mime in ACCEPTED_IMAGE_TYPES:
-            extension = ACCEPTED_IMAGE_TYPES[mime][0] 
-            return mime, extension
-        return None, None
-    except Exception as e:
-        logging.warning(f"Error determining file type with magic: {e}")
-        return None, None
-
-# This remains the entry point for your Azure Function
-app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
-@app.route(route="Upload_image")
-def Upload_image(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("🚀 Upload_image function triggered.")
+def main(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("🚀 Azure Function 'Upload_image' triggered.")
 
     try:
-        # --- 1. DETERMINE AND DECODE FILE BYTES ---
-        content_type = req.headers.get('Content-Type', '').lower()
-        file_bytes = None
-        filename = req.headers.get("x-filename", "image")
+        # --- Step 1: Read environment variables ---
+        blob_conn_str = os.getenv("BLOB_CONNECTION_STRING")
+        container_name = os.getenv("BLOB_CONTAINER_NAME")
 
-        if 'application/json' in content_type:
-            # Assume client sent a JSON payload with a Base64 string
-            try:
-                req_json = req.get_json()
-                # Common practice is to name the field 'file_data' or 'base64_data'
-                base64_data = req_json.get('file_data') 
-                if not base64_data:
-                    return func.HttpResponse("❌ JSON body missing 'file_data' field.", status_code=400)
-                
-                # Decode the Base64 string into raw bytes
-                file_bytes = base64.b64decode(base64_data)
-                logging.info("Detected JSON/Base64 payload and decoded successfully.")
-            except ValueError:
-                return func.HttpResponse("❌ Invalid JSON or Base64 data.", status_code=400)
-            except Exception as e:
-                return func.HttpResponse(f"❌ Failed to process JSON payload: {e}", status_code=400)
-                
-        else:
-            # Assume client sent raw binary data (e.g., via multipart/form-data or raw body)
-            file_bytes = req.get_body()
-            logging.info("Detected raw binary payload.")
+        if not blob_conn_str:
+            logger.error("❌ Missing environment variable: BLOB_CONNECTION_STRING")
+            return func.HttpResponse("Missing BLOB_CONNECTION_STRING", status_code=500)
+        if not container_name:
+            logger.error("❌ Missing environment variable: BLOB_CONTAINER_NAME")
+            return func.HttpResponse("Missing BLOB_CONTAINER_NAME", status_code=500)
 
+        logger.info(f"✅ Environment variables loaded. Container: {container_name}")
+
+        # --- Step 2: Initialize blob client ---
+        try:
+            blob_service_client = BlobServiceClient.from_connection_string(blob_conn_str)
+            container_client = blob_service_client.get_container_client(container_name)
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize BlobServiceClient: {e}")
+            return func.HttpResponse(f"Failed to connect to blob: {e}", status_code=500)
+
+        # --- Step 3: Read request body ---
+        file_bytes = req.get_body()
         if not file_bytes:
-            return func.HttpResponse("❌ No file data received in request body.", status_code=400)
+            logger.warning("⚠️ No file received in request body.")
+            return func.HttpResponse("No file received", status_code=400)
 
-        # --- 2. VALIDATE FILE FORMAT ---
-        mime_type, file_ext = get_file_type_info(file_bytes)
-        
-        if not mime_type:
-            # The file bytes do not correspond to a valid PNG or JPEG format
-            return func.HttpResponse(
-                "❌ Invalid file type. Only JPEG and PNG are accepted or file data is corrupted.", 
-                status_code=415 
-            )
-
-        # --- 3. PREPARE BLOB METADATA ---
-        base_name = os.path.splitext(filename)[0]
-        final_filename = f"{base_name}{file_ext}" # Use validated extension
-
+        filename = req.headers.get("x-filename", f"image_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        blob_name = f"{timestamp}_{final_filename}"
+        blob_name = f"{timestamp}_{filename}"
 
-        # --- 4. UPLOAD TO AZURE BLOB STORAGE ---
-        blob_client = container_client.get_blob_client(blob_name)
-        
-        blob_client.upload_blob(
-            file_bytes,                                   
-            overwrite=True, 
-            # CRITICAL: Set the correct MIME type for the downloaded file to work
-            content_settings={'content_type': mime_type} 
-        )
-        logging.info(f"✅ File uploaded as {blob_name} with MIME type {mime_type}")
+        logger.info(f"📝 Uploading file: {blob_name} (size: {len(file_bytes)} bytes)")
 
-        # --- 5. GENERATE SAS URL AND RETURN RESPONSE ---
-        sas_token = generate_blob_sas(
-            account_name=blob_service_client.account_name,
-            container_name=BLOB_CONTAINER_NAME,
-            blob_name=blob_name,
-            account_key=blob_service_client.credential.account_key,
-            permission=BlobSasPermissions(read=True),
-            expiry=datetime.utcnow() + timedelta(hours=1),
-        )
+        # --- Step 4: Upload file ---
+        try:
+            blob_client = container_client.get_blob_client(blob_name)
+            blob_client.upload_blob(BytesIO(file_bytes), overwrite=True)
+            logger.info(f"✅ File uploaded successfully as {blob_name}")
+        except Exception as e:
+            logger.error(f"❌ Blob upload failed: {e}")
+            logger.debug(traceback.format_exc())
+            return func.HttpResponse(f"Upload failed: {e}", status_code=500)
 
-        blob_url = (
-            f"https://{blob_service_client.account_name}.blob.core.windows.net/"
-            f"{BLOB_CONTAINER_NAME}/{blob_name}?{sas_token}"
-        )
+        # --- Step 5: Generate SAS URL ---
+        try:
+            account_name = blob_service_client.account_name
+            account_key = blob_service_client.credential.account_key
+            if not account_key:
+                logger.warning("⚠️ Account key not found in credential — SAS URL might not work if using managed identity.")
+                sas_token = None
+            else:
+                sas_token = generate_blob_sas(
+                    account_name=account_name,
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    account_key=account_key,
+                    permission=BlobSasPermissions(read=True),
+                    expiry=datetime.utcnow() + timedelta(hours=1),
+                )
 
+            if sas_token:
+                blob_url = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}?{sas_token}"
+            else:
+                blob_url = f"https://{account_name}.blob.core.windows.net/{container_name}/{blob_name}"
+
+            logger.info(f"🔗 Blob accessible at: {blob_url}")
+
+        except Exception as e:
+            logger.error(f"❌ SAS URL generation failed: {e}")
+            logger.debug(traceback.format_exc())
+            blob_url = None
+
+        # --- Step 6: Return JSON response ---
         response_body = {
             "blob_name": blob_name,
-            "blob_url": blob_url
+            "blob_url": blob_url,
+            "timestamp": timestamp,
+            "status": "success",
         }
 
-        logging.info(f"✅ Upload complete. SAS URL generated for {blob_name}")
         return func.HttpResponse(
-            body=json.dumps(response_body),
+            body=json.dumps(response_body, indent=2),
             status_code=200,
             mimetype="application/json"
         )
 
     except Exception as e:
         tb = traceback.format_exc()
-        logging.error(f"❌ Exception occurred:\n{tb}")
-        return func.HttpResponse(f"❌ Internal Server Error. Details: {e}", status_code=500)
+        logger.error(f"🔥 Unexpected failure: {e}\n{tb}")
+        return func.HttpResponse(f"Internal Server Error:\n{tb}", status_code=500)
