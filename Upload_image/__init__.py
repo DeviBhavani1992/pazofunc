@@ -1,59 +1,96 @@
 import logging
 import azure.functions as func
 import os
-from azure.storage.blob import BlobServiceClient
-from datetime import datetime
+from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
+from datetime import datetime, timedelta
+from io import BytesIO
 import json
 import traceback
-from io import BytesIO
 
 # -----------------------------
-# Environment variables
+# Environment Variables
 # -----------------------------
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME")
 
-# -----------------------------
-# Initialize BlobServiceClient
-# -----------------------------
-blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
+if not BLOB_CONNECTION_STRING or not BLOB_CONTAINER_NAME:
+    raise ValueError("❌ Missing BLOB_CONNECTION_STRING or BLOB_CONTAINER_NAME environment variables.")
 
 # -----------------------------
-# Azure Function entry point
+# Initialize Clients
+# -----------------------------
+try:
+    blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
+    container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
+    logging.info(f"✅ Connected to Blob Storage: {blob_service_client.account_name}")
+except Exception as e:
+    logging.error(f"❌ Failed to connect to Azure Blob Storage: {e}")
+    raise
+
+# -----------------------------
+# Azure Function Entry Point
 # -----------------------------
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Upload_image function triggered.")
+    logging.info("🚀 Upload_image function triggered.")
 
     try:
-        # Read raw bytes from request body
+        # -----------------------------
+        # Read File Bytes
+        # -----------------------------
         file_bytes = req.get_body()
         if not file_bytes:
+            logging.warning("⚠️ No file data found in request body.")
             return func.HttpResponse(
                 json.dumps({"error": "No file received in request body."}),
                 status_code=400,
                 mimetype="application/json"
             )
 
-        # Wrap bytes in BytesIO for safe handling
         file_stream = BytesIO(file_bytes)
 
-        # Extract filename from custom header or generate one
-        filename = req.headers.get(
-            "x-filename", f"image_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-        )
+        # -----------------------------
+        # Prepare Blob Info
+        # -----------------------------
+        filename = req.headers.get("x-filename", f"image_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         blob_name = f"{timestamp}_{filename}"
 
-        # Upload to Azure Blob Storage
         blob_client = container_client.get_blob_client(blob_name)
+
+        # -----------------------------
+        # Upload to Blob Storage
+        # -----------------------------
         blob_client.upload_blob(file_stream, overwrite=True)
-        logging.info(f"✅ File uploaded successfully as {blob_name}")
+        logging.info(f"✅ File uploaded successfully: {blob_name}")
 
-        # Construct accessible URL (works for public container)
-        blob_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
+        # -----------------------------
+        # Generate Accessible URL
+        # -----------------------------
+        account_name = blob_service_client.account_name
+        blob_url = f"https://{account_name}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
 
-        # Respond with JSON containing blob info
+        # Attempt to generate SAS token (only works if account key available)
+        try:
+            account_key = getattr(blob_service_client.credential, "account_key", None)
+            if account_key:
+                sas_token = generate_blob_sas(
+                    account_name=account_name,
+                    container_name=BLOB_CONTAINER_NAME,
+                    blob_name=blob_name,
+                    account_key=account_key,
+                    permission=BlobSasPermissions(read=True),
+                    expiry=datetime.utcnow() + timedelta(hours=1)
+                )
+                blob_url = f"{blob_url}?{sas_token}"
+                logging.info("🔑 SAS token generated successfully.")
+            else:
+                logging.warning("⚠️ No account key found — SAS token not generated. Blob may be private.")
+        except Exception as sas_err:
+            logging.error(f"❌ Failed to generate SAS token: {sas_err}")
+
+        # -----------------------------
+        # Return JSON Response
+        # -----------------------------
         return func.HttpResponse(
             body=json.dumps({"blob_name": blob_name, "blob_url": blob_url}),
             status_code=200,
@@ -61,10 +98,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except Exception as e:
-        # Detailed logging for debugging
         tb = traceback.format_exc()
         logging.error(f"❌ Exception occurred:\n{tb}")
-
         return func.HttpResponse(
             body=json.dumps({"error": "Upload failed", "details": tb}),
             status_code=500,
