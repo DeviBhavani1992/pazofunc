@@ -1,0 +1,50 @@
+# YOLOv11 CPU-based Dockerfile (Slim, Person Detection Only)
+FROM python:3.11-slim-bookworm
+
+ARG CACHE_BUST=1
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Kolkata
+ENV YOLO_VERBOSE=True
+ENV YOLO_CACHE_DIR=/app/models
+
+WORKDIR /app
+
+# Install system dependencies (minimal)
+RUN echo "Cache bust version: ${CACHE_BUST}" && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    curl git wget ca-certificates tzdata \
+    libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgl1-mesa-glx libgtk-3-0 \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install only required Python packages
+RUN pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu \
+    opencv-python-headless \
+    ultralytics \
+    numpy \
+    pillow \
+    pyyaml \
+    requests
+
+# Create directories for models and outputs
+RUN mkdir -p /app/models /app/data /app/outputs
+
+# Set up YOLOv11 model
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); print('YOLOv11n downloaded successfully')"
+
+# Add test and inference scripts
+COPY scripts/test_yolov11.py /app/test_yolov11.py
+COPY scripts/inference.py /app/inference.py
+
+EXPOSE 8000
+
+CMD ["python", "/app/test_yolov11.py"]

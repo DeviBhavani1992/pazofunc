@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  yolov11:
+    build:
+      context: .
+      dockerfile: Dockerfile.yolov11.slim
+    container_name: yolov11-cpu
+    depends_on:
+      - mongo
+    volumes:
+      - ./data:/app/data:ro
+      - ./outputs:/app/outputs
+      - ./models:/app/models
+      - ./scripts:/app/scripts
+    ports:
+      - "8001:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - YOLO_VERBOSE=True
+      - USE_MONGO=1
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=yolov11
+
+  mongo:
+    image: mongo:6.0
+    container_name: yolov11-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
