@@ -6,15 +6,20 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import json
 import traceback
+import requests  # ✅ added to trigger YOLO inference API
 
 # -----------------------------
 # Environment Variables
 # -----------------------------
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME")
+YOLO_API_URL = os.getenv("YOLO_API_URL")  # e.g., http://yolov11-app:8000/infer or public endpoint
 
 if not BLOB_CONNECTION_STRING or not BLOB_CONTAINER_NAME:
     raise ValueError("❌ Missing BLOB_CONNECTION_STRING or BLOB_CONTAINER_NAME environment variables.")
+
+if not YOLO_API_URL:
+    logging.warning("⚠️ YOLO_API_URL not set. Inference trigger will be skipped.")
 
 # -----------------------------
 # Initialize Clients
@@ -69,7 +74,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         account_name = blob_service_client.account_name
         blob_url = f"https://{account_name}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
 
-        # Attempt to generate SAS token (only works if account key available)
         try:
             account_key = getattr(blob_service_client.credential, "account_key", None)
             if account_key:
@@ -89,10 +93,32 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logging.error(f"❌ Failed to generate SAS token: {sas_err}")
 
         # -----------------------------
+        # Trigger YOLOv11 Container for Inference
+        # -----------------------------
+        yolo_result = None
+        if YOLO_API_URL:
+            try:
+                logging.info(f"📤 Triggering YOLOv11 inference at {YOLO_API_URL}")
+                resp = requests.post(YOLO_API_URL, json={"blob_url": blob_url}, timeout=60)
+                if resp.status_code == 200:
+                    yolo_result = resp.json()
+                    logging.info(f"✅ YOLO inference successful: {yolo_result}")
+                else:
+                    logging.warning(f"⚠️ YOLO API returned {resp.status_code}: {resp.text}")
+            except Exception as yolo_err:
+                logging.error(f"❌ YOLO inference trigger failed: {yolo_err}")
+
+        # -----------------------------
         # Return JSON Response
         # -----------------------------
+        response_body = {
+            "blob_name": blob_name,
+            "blob_url": blob_url,
+            "yolo_inference": yolo_result or "Not triggered or failed"
+        }
+
         return func.HttpResponse(
-            body=json.dumps({"blob_name": blob_name, "blob_url": blob_url}),
+            body=json.dumps(response_body),
             status_code=200,
             mimetype="application/json"
         )
