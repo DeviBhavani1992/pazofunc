@@ -6,20 +6,19 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import json
 import traceback
-import requests  # ✅ added to trigger YOLO inference API
+import requests
+from pymongo import MongoClient  # ✅ Added for MongoDB
 
 # -----------------------------
 # Environment Variables
 # -----------------------------
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME")
-YOLO_API_URL = os.getenv("YOLO_API_URL")  # e.g., http://yolov11-app:8000/infer or public endpoint
+YOLO_API_URL = os.getenv("YOLO_API_URL")  # e.g., http://yolov11-app:8000/infer
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://root:example@yolov11-mongo:27017/")  # ✅ default URI to ACA Mongo
 
 if not BLOB_CONNECTION_STRING or not BLOB_CONTAINER_NAME:
     raise ValueError("❌ Missing BLOB_CONNECTION_STRING or BLOB_CONTAINER_NAME environment variables.")
-
-if not YOLO_API_URL:
-    logging.warning("⚠️ YOLO_API_URL not set. Inference trigger will be skipped.")
 
 # -----------------------------
 # Initialize Clients
@@ -33,6 +32,19 @@ except Exception as e:
     raise
 
 # -----------------------------
+# Connect to MongoDB
+# -----------------------------
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client["pazzo_db"]          # ✅ your database
+    collection = db["uploads"]             # ✅ your collection
+    logging.info("✅ Connected to MongoDB successfully.")
+except Exception as e:
+    logging.error(f"❌ Failed to connect to MongoDB: {e}")
+    mongo_client = None
+    collection = None
+
+# -----------------------------
 # Azure Function Entry Point
 # -----------------------------
 def main(req: func.HttpRequest) -> func.HttpResponse:
@@ -44,7 +56,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         # -----------------------------
         file_bytes = req.get_body()
         if not file_bytes:
-            logging.warning("⚠️ No file data found in request body.")
             return func.HttpResponse(
                 json.dumps({"error": "No file received in request body."}),
                 status_code=400,
@@ -86,9 +97,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     expiry=datetime.utcnow() + timedelta(hours=1)
                 )
                 blob_url = f"{blob_url}?{sas_token}"
-                logging.info("🔑 SAS token generated successfully.")
             else:
-                logging.warning("⚠️ No account key found — SAS token not generated. Blob may be private.")
+                logging.warning("⚠️ No account key found — SAS token not generated.")
         except Exception as sas_err:
             logging.error(f"❌ Failed to generate SAS token: {sas_err}")
 
@@ -98,25 +108,37 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         yolo_result = None
         if YOLO_API_URL:
             try:
-                logging.info(f"📤 Triggering YOLOv11 inference at {YOLO_API_URL}")
                 resp = requests.post(YOLO_API_URL, json={"blob_url": blob_url}, timeout=60)
                 if resp.status_code == 200:
                     yolo_result = resp.json()
-                    logging.info(f"✅ YOLO inference successful: {yolo_result}")
                 else:
                     logging.warning(f"⚠️ YOLO API returned {resp.status_code}: {resp.text}")
             except Exception as yolo_err:
                 logging.error(f"❌ YOLO inference trigger failed: {yolo_err}")
 
         # -----------------------------
-        # Return JSON Response
+        # Prepare Response
         # -----------------------------
         response_body = {
             "blob_name": blob_name,
             "blob_url": blob_url,
+            "timestamp": timestamp,
             "yolo_inference": yolo_result or "Not triggered or failed"
         }
 
+        # -----------------------------
+        # Insert Record into MongoDB
+        # -----------------------------
+        if collection:
+            try:
+                collection.insert_one(response_body)
+                logging.info("✅ Record inserted into MongoDB successfully.")
+            except Exception as mongo_err:
+                logging.error(f"❌ Failed to insert record into MongoDB: {mongo_err}")
+
+        # -----------------------------
+        # Return JSON Response
+        # -----------------------------
         return func.HttpResponse(
             body=json.dumps(response_body),
             status_code=200,
