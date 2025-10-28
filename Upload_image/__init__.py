@@ -1,155 +1,111 @@
 import logging
 import azure.functions as func
+from azure.storage.blob import BlobServiceClient
+from pymongo import MongoClient
 import os
-from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
-from datetime import datetime, timedelta
-from io import BytesIO
-import json
+from datetime import datetime
 import traceback
-import requests
-from pymongo import MongoClient  # ✅ Added for MongoDB
+from io import BytesIO
+from PIL import Image
 
-# -----------------------------
-# Environment Variables
-# -----------------------------
-BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
-BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME")
-YOLO_API_URL = os.getenv("YOLO_API_URL")  # e.g., http://yolov11-app:8000/infer
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://root:example@yolov11-mongo:27017/")  # ✅ default URI to ACA Mongo
 
-if not BLOB_CONNECTION_STRING or not BLOB_CONTAINER_NAME:
-    raise ValueError("❌ Missing BLOB_CONNECTION_STRING or BLOB_CONTAINER_NAME environment variables.")
-
-# -----------------------------
-# Initialize Clients
-# -----------------------------
-try:
-    blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
-    container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
-    logging.info(f"✅ Connected to Blob Storage: {blob_service_client.account_name}")
-except Exception as e:
-    logging.error(f"❌ Failed to connect to Azure Blob Storage: {e}")
-    raise
-
-# -----------------------------
-# Connect to MongoDB
-# -----------------------------
-try:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client["pazzo_db"]          # ✅ your database
-    collection = db["uploads"]             # ✅ your collection
-    logging.info("✅ Connected to MongoDB successfully.")
-except Exception as e:
-    logging.error(f"❌ Failed to connect to MongoDB: {e}")
-    mongo_client = None
-    collection = None
-
-# -----------------------------
-# Azure Function Entry Point
-# -----------------------------
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("🚀 Upload_image function triggered.")
+    logging.info("🔵 Azure Function 'Upload_image' triggered")
 
     try:
-        # -----------------------------
-        # Read File Bytes
-        # -----------------------------
-        file_bytes = req.get_body()
-        if not file_bytes:
-            return func.HttpResponse(
-                json.dumps({"error": "No file received in request body."}),
-                status_code=400,
-                mimetype="application/json"
-            )
+        # -------------------------
+        # 🔹 Step 1: Validate input
+        # -------------------------
+        logging.info("📥 Checking for uploaded file in request...")
+        file = req.files.get('file')
+        if not file:
+            logging.error("❌ No file found in request.")
+            return func.HttpResponse("No file uploaded", status_code=400)
 
-        file_stream = BytesIO(file_bytes)
+        # Read file bytes
+        image_bytes = file.stream.read()
+        image_name = file.filename
+        logging.info(f"📁 Received file: {image_name} ({len(image_bytes)} bytes)")
 
-        # -----------------------------
-        # Prepare Blob Info
-        # -----------------------------
-        filename = req.headers.get("x-filename", f"image_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg")
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        blob_name = f"{timestamp}_{filename}"
+        # -------------------------
+        # 🔹 Step 2: Validate environment variables
+        # -------------------------
+        blob_conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        blob_container = os.getenv("BLOB_CONTAINER_NAME", "uploads")
+        mongo_uri = os.getenv("MONGO_URI")
+        mongo_db_name = os.getenv("MONGO_DB_NAME", "image_db")
+        mongo_collection = os.getenv("MONGO_COLLECTION", "uploads")
 
-        blob_client = container_client.get_blob_client(blob_name)
+        logging.info(
+            f"🧩 ENV CHECK → "
+            f"AZURE_STORAGE_CONNECTION_STRING={'SET' if blob_conn_str else 'MISSING'}, "
+            f"BLOB_CONTAINER_NAME={blob_container}, "
+            f"MONGO_URI={'SET' if mongo_uri else 'MISSING'}, "
+            f"MONGO_DB_NAME={mongo_db_name}, "
+            f"MONGO_COLLECTION={mongo_collection}"
+        )
 
-        # -----------------------------
-        # Upload to Blob Storage
-        # -----------------------------
-        blob_client.upload_blob(file_stream, overwrite=True)
-        logging.info(f"✅ File uploaded successfully: {blob_name}")
+        # -------------------------
+        # 🔹 Step 3: Upload to Azure Blob Storage
+        # -------------------------
+        logging.info("📤 Connecting to Azure Blob Storage...")
+        if not blob_conn_str:
+            raise ValueError("Missing environment variable: AZURE_STORAGE_CONNECTION_STRING")
 
-        # -----------------------------
-        # Generate Accessible URL
-        # -----------------------------
-        account_name = blob_service_client.account_name
-        blob_url = f"https://{account_name}.blob.core.windows.net/{BLOB_CONTAINER_NAME}/{blob_name}"
+        blob_service = BlobServiceClient.from_connection_string(blob_conn_str)
+        container_client = blob_service.get_container_client(blob_container)
 
-        try:
-            account_key = getattr(blob_service_client.credential, "account_key", None)
-            if account_key:
-                sas_token = generate_blob_sas(
-                    account_name=account_name,
-                    container_name=BLOB_CONTAINER_NAME,
-                    blob_name=blob_name,
-                    account_key=account_key,
-                    permission=BlobSasPermissions(read=True),
-                    expiry=datetime.utcnow() + timedelta(hours=1)
-                )
-                blob_url = f"{blob_url}?{sas_token}"
-            else:
-                logging.warning("⚠️ No account key found — SAS token not generated.")
-        except Exception as sas_err:
-            logging.error(f"❌ Failed to generate SAS token: {sas_err}")
+        logging.info(f"📦 Uploading file '{image_name}' to container '{blob_container}'...")
+        container_client.upload_blob(name=image_name, data=image_bytes, overwrite=True)
 
-        # -----------------------------
-        # Trigger YOLOv11 Container for Inference
-        # -----------------------------
-        yolo_result = None
-        if YOLO_API_URL:
+        blob_url = f"{container_client.url}/{image_name}"
+        logging.info(f"✅ Successfully uploaded to Blob: {blob_url}")
+
+        # -------------------------
+        # 🔹 Step 4: Optional — Log metadata to MongoDB
+        # -------------------------
+        if mongo_uri:
             try:
-                resp = requests.post(YOLO_API_URL, json={"blob_url": blob_url}, timeout=60)
-                if resp.status_code == 200:
-                    yolo_result = resp.json()
-                else:
-                    logging.warning(f"⚠️ YOLO API returned {resp.status_code}: {resp.text}")
-            except Exception as yolo_err:
-                logging.error(f"❌ YOLO inference trigger failed: {yolo_err}")
+                logging.info("📡 Connecting to MongoDB...")
+                client = MongoClient(mongo_uri)
+                db = client[mongo_db_name]
+                collection = db[mongo_collection]
 
-        # -----------------------------
-        # Prepare Response
-        # -----------------------------
-        response_body = {
-            "blob_name": blob_name,
-            "blob_url": blob_url,
-            "timestamp": timestamp,
-            "yolo_inference": yolo_result or "Not triggered or failed"
-        }
+                doc = {
+                    "filename": image_name,
+                    "upload_time": datetime.utcnow(),
+                    "blob_url": blob_url,
+                }
 
-        # -----------------------------
-        # Insert Record into MongoDB
-        # -----------------------------
-        if collection:
-            try:
-                collection.insert_one(response_body)
-                logging.info("✅ Record inserted into MongoDB successfully.")
+                collection.insert_one(doc)
+                logging.info(f"✅ Inserted metadata into MongoDB: {mongo_db_name}.{mongo_collection}")
+
             except Exception as mongo_err:
-                logging.error(f"❌ Failed to insert record into MongoDB: {mongo_err}")
+                logging.error(f"⚠️ MongoDB insertion failed: {str(mongo_err)}")
+                logging.error(traceback.format_exc())
 
-        # -----------------------------
-        # Return JSON Response
-        # -----------------------------
+        else:
+            logging.warning("⚠️ Skipping MongoDB logging (MONGO_URI not configured).")
+
+        # -------------------------
+        # 🔹 Step 5: Return successful response
+        # -------------------------
+        logging.info("🎉 Upload operation completed successfully.")
         return func.HttpResponse(
-            body=json.dumps(response_body),
-            status_code=200,
-            mimetype="application/json"
+            f"Upload successful! File URL: {blob_url}",
+            status_code=200
         )
 
     except Exception as e:
-        tb = traceback.format_exc()
-        logging.error(f"❌ Exception occurred:\n{tb}")
+        # -------------------------
+        # 🔥 Step 6: Handle any exception
+        # -------------------------
+        error_trace = traceback.format_exc()
+        logging.error("🔥 Exception in Upload_image function")
+        logging.error(f"Error message: {str(e)}")
+        logging.error(f"Traceback:\n{error_trace}")
+
         return func.HttpResponse(
-            body=json.dumps({"error": "Upload failed", "details": tb}),
-            status_code=500,
-            mimetype="application/json"
+            f"Internal server error: {str(e)}\n\nTraceback:\n{error_trace}",
+            status_code=500
         )
