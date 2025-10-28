@@ -4,4 +4,7 @@
 
 azure-functions
 azure-storage-blob
+pymongo
+pillow
+requests
 python-magic
