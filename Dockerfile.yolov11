@@ -1,53 +1,38 @@
-# YOLOv11 CPU-based Dockerfile (Slim, Person Detection Only)
-FROM python:3.11-slim-bookworm
-
-ARG CACHE_BUST=1
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Kolkata
-ENV YOLO_VERBOSE=True
-ENV YOLO_CACHE_DIR=/app/models
+# YOLOv11/12 CPU Dockerfile with Python 3.12
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Install system dependencies (minimal)
-RUN echo "Cache bust version: ${CACHE_BUST}" && \
-    apt-get update && apt-get install -y --no-install-recommends \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Kolkata
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git wget ca-certificates tzdata \
-    libglib2.0-0 libsm6 libxext6 libxrender-dev \
-    libgl1-mesa-glx libgtk-3-0 \
-    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
-    && echo $TZ > /etc/timezone \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install only required Python packages
+# Install packages
 RUN pip install --no-cache-dir \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu \
-    opencv-python-headless \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+    opencv-python-headless==4.10.0.84 \
     ultralytics \
     numpy \
     pillow \
     pyyaml \
     requests \
+    flask \
     gunicorn \
     pymongo
 
-# Create directories for models and outputs
-RUN mkdir -p /app/models /app/data /app/outputs
-
-# Set up YOLOv11 model
-RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); print('YOLOv11n downloaded successfully')"
-
-# Add test and inference scripts
-COPY scripts/test_yolov11.py /app/test_yolov11.py
+# Copy app
 COPY scripts/inference.py /app/inference.py
 
 EXPOSE 8000
 
-CMD ["python", "/app/inference.py"]
-
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "inference:app"]
