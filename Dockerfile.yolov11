@@ -33,7 +33,9 @@ RUN pip install --no-cache-dir \
     numpy \
     pillow \
     pyyaml \
-    requests
+    requests \
+    gunicorn \
+    pymongo
 
 # Create directories for models and outputs
 RUN mkdir -p /app/models /app/data /app/outputs
@@ -47,4 +49,5 @@ COPY scripts/inference.py /app/inference.py
 
 EXPOSE 8000
 
-CMD ["python", "/app/test_yolov11.py"]
+CMD ["python", "/app/inference.py"]
+
