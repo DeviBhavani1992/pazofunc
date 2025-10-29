@@ -7,16 +7,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Kolkata
 
+# ------------------------
 # System dependencies
+# ------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git wget ca-certificates tzdata \
     libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
+# ------------------------
+# Upgrade pip and install dependencies
+# ------------------------
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install packages
 RUN pip install --no-cache-dir \
     torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir \
@@ -30,9 +33,21 @@ RUN pip install --no-cache-dir \
     gunicorn \
     pymongo
 
-# Copy app
+# ------------------------
+# Pre-download YOLO model
+# ------------------------
+# This downloads and stores the model in /app/models/
+RUN mkdir -p /app/models && \
+    wget -O /app/models/yolo11n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt
+
+# ------------------------
+# Copy application
+# ------------------------
 COPY scripts/inference.py /app/inference.py
 
 EXPOSE 8000
 
+# ------------------------
+# Start app with gunicorn
+# ------------------------
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "inference:app"]
