@@ -26,14 +26,14 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"📁 Received file: {image_name} ({len(image_bytes)} bytes)")
 
         # -------------------------
-        # 🔹 Step 2: Validate environment variables
+        # 🔹 Step 2: Load environment variables
         # -------------------------
         blob_conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
         blob_container = os.getenv("BLOB_CONTAINER_NAME", "uploads")
         mongo_uri = os.getenv("MONGO_URI")
         mongo_db_name = os.getenv("MONGO_DB_NAME", "image_db")
         mongo_collection = os.getenv("MONGO_COLLECTION", "uploads")
-        yolo_endpoint = os.getenv("YOLO_ENDPOINT")  # e.g. https://yolov11-app.<env>.azurecontainerapps.io
+        yolo_endpoint = os.getenv("YOLO_ENDPOINT")
 
         logging.info(
             f"🧩 ENV CHECK → "
@@ -44,7 +44,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
         # -------------------------
-        # 🔹 Step 3: Upload to Azure Blob Storage
+        # 🔹 Step 3: Upload to Azure Blob
         # -------------------------
         if not blob_conn_str:
             raise ValueError("Missing environment variable: AZURE_STORAGE_CONNECTION_STRING")
@@ -57,11 +57,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"✅ Uploaded to Blob: {blob_url}")
 
         # -------------------------
-        # 🔹 Step 4: Optional — Log metadata to MongoDB
+        # 🔹 Step 4: Log metadata to Cosmos MongoDB (optional)
         # -------------------------
         if mongo_uri:
             try:
-                client = MongoClient(mongo_uri)
+                client = MongoClient(mongo_uri, tls=True, tlsAllowInvalidCertificates=True)
                 db = client[mongo_db_name]
                 collection = db[mongo_collection]
                 doc = {
@@ -70,15 +70,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "blob_url": blob_url,
                 }
                 collection.insert_one(doc)
-                logging.info(f"✅ Metadata inserted into MongoDB")
+                logging.info("✅ Metadata inserted into Cosmos MongoDB")
             except Exception as mongo_err:
-                logging.error(f"⚠️ MongoDB insertion failed: {mongo_err}")
+                logging.error(f"⚠️ Cosmos MongoDB insertion failed: {mongo_err}")
                 logging.error(traceback.format_exc())
         else:
             logging.warning("⚠️ Skipping MongoDB logging (MONGO_URI not configured).")
 
         # -------------------------
-        # 🔹 Step 5: Trigger YOLOv11 inference (auto scale-up)
+        # 🔹 Step 5: Trigger YOLOv11 inference
         # -------------------------
         if yolo_endpoint:
             payload = {"blob_url": blob_url}
@@ -90,7 +90,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     logging.info(f"Response: {r.text}")
                     break
                 except Exception as e:
-                    logging.warning(f"⚠️ Attempt {attempt+1} failed: {e}")
+                    logging.warning(f"⚠️ Attempt {attempt + 1} failed: {e}")
                     time.sleep(5)
             else:
                 logging.error("❌ YOLOv11 did not respond after multiple retries.")
