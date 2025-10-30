@@ -8,3 +8,5 @@ pymongo
 pillow
 requests
 python-magic
+uvicorn 
+fastapi
