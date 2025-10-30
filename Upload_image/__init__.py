@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime
 import traceback
+import json
 
 # -------------------------------------------------
 # ✅ Configure logging for Azure Functions
@@ -94,16 +95,25 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         # -------------------------------------------------
         if yolo_endpoint:
             payload = {"blob_url": blob_url}
+            headers = {"Content-Type": "application/json"}  # ✅ FIXED: Ensure correct content type
             inference_success = False
 
             for attempt in range(1, 6):
                 try:
-                    logger.info(f"🚀 Sending inference request to YOLOv11 (Attempt {attempt}) → {yolo_endpoint}/infer")
-                    response = requests.post(f"{yolo_endpoint}/infer", json=payload, timeout=25)
-                    response.raise_for_status()
+                    logger.info(f"🚀 Sending inference request (Attempt {attempt}) → {yolo_endpoint}/infer")
+                    response = requests.post(
+                        f"{yolo_endpoint}/infer",
+                        data=json.dumps(payload),
+                        headers=headers,
+                        timeout=25
+                    )
 
+                    logger.info(f"📨 Sent with headers: {headers}")
+                    logger.info(f"📦 Payload: {payload}")
+
+                    response.raise_for_status()
                     logger.info(f"✅ YOLOv11 inference successful (HTTP {response.status_code})")
-                    logger.info(f"🔍 Response: {response.text[:500]}")  # limit long responses
+                    logger.info(f"🔍 Response: {response.text[:300]}")  # limit long responses
                     inference_success = True
                     break
 
