@@ -10,3 +10,10 @@ requests
 python-magic
 uvicorn 
 fastapi
+
+# --- Added for YOLOE (Open Vocabulary Model) ---
+torch>=2.1.0
+torchvision>=0.18.0
+timm>=1.0.9
+transformers>=4.38.0
+ultralytics>=8.3.0
