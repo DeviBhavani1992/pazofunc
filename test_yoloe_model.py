@@ -39,9 +39,10 @@ def get_color_name(rgb):
     """Classify RGB color into white / black / other"""
     r, g, b = rgb
     brightness = np.mean([r, g, b])
+    # improved black range detection
     if brightness > 170 and abs(r - g) < 40 and abs(r - b) < 40:
         return "white"
-    elif brightness < 60:
+    elif brightness < 90:  # widened threshold for black (was 60)
         return "black"
     else:
         return "other"
@@ -101,7 +102,7 @@ for img_path in image_files:
         print(f"     - {label} ({confidence:.2f}) → Color: {color_name} ({color_percent:.1f}%)")
 
         # --- Assign shirt and pant colors
-        if any(k in label.lower() for k in ["shirt", "top"]):
+        if any(k in label.lower() for k in ["shirt", "top", "t-shirt", "tee"]):
             shirt_color = color_name
         elif any(k in label.lower() for k in ["pant", "trouser", "jean"]):
             pant_color = color_name
@@ -115,13 +116,11 @@ for img_path in image_files:
             ""
         ])
 
-    # ✅ Final Dress Code Logic
+    # ✅ Final Dress Code Logic (revised)
     if (shirt_color in ["white", "black"]) and (pant_color == "black"):
         status = "Dress Code Passed ✅"
-    elif shirt_color or pant_color:
-        status = "Dress Code Violation (Missing detections)"
     else:
-        status = "Dress Code Violation (No detections)"
+        status = "Dress Code Violation ❌"
 
     print(f"🎯 Result: {status}\n")
     csv_data.append(["-", "-", "-", "-", "-", status])

@@ -2,10 +2,10 @@ Image,Label,Detected_Color,Color_%,Confidence,Dress_Code_Status
 SM-Q15.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q27.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q50.jpg,short_sleeved_shirt,other,61.8%,0.31949520111083984,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q28.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q3.jpg,long_sleeved_shirt,white,52.5%,0.8923781514167786,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q1.jpg,trousers,black,71.8%,0.9400243163108826,
 SM-Q1.jpg,long_sleeved_shirt,white,51.5%,0.9230651259422302,
 -,-,-,-,-,Dress Code Passed ✅
@@ -13,9 +13,9 @@ SM-Q7.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q5.jpg,long_sleeved_shirt,white,48.3%,0.9579210877418518,
 SM-Q5.jpg,trousers,black,65.4%,0.9479499459266663,
 -,-,-,-,-,Dress Code Passed ✅
-SM-Q12.jpg,short_sleeved_shirt,other,50.2%,0.9620180726051331,
+SM-Q12.jpg,short_sleeved_shirt,black,50.2%,0.9620180726051331,
 SM-Q12.jpg,trousers,black,59.9%,0.5789242386817932,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Passed ✅
 SM-Q37.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q41.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q46.jpg,-,-,-,-,Dress Code Violation (No detections)
@@ -25,7 +25,7 @@ SM-Q21.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q40.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q51.jpg,short_sleeved_shirt,white,69.8%,0.4812191426753998,
 SM-Q51.jpg,long_sleeved_shirt,white,69.9%,0.34637710452079773,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q45.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q35.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q48.jpg,-,-,-,-,Dress Code Violation (No detections)
@@ -43,24 +43,24 @@ SM-Q22.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q30.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q20.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q36.jpg,vest_dress,black,55.6%,0.2506864666938782,
--,-,-,-,-,Dress Code Violation (No detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q32.jpg,short_sleeved_shirt,black,55.0%,0.6951140761375427,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q29.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q6.jpg,long_sleeved_shirt,black,40.3%,0.6360264420509338,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q43.jpg,-,-,-,-,Dress Code Violation (No detections)
-SM-Q11.jpg,short_sleeved_shirt,other,56.6%,0.9689281582832336,
+SM-Q11.jpg,short_sleeved_shirt,black,56.6%,0.9689281582832336,
 SM-Q11.jpg,trousers,black,78.0%,0.46609044075012207,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Passed ✅
 SM-Q47.jpg,short_sleeved_shirt,white,70.6%,0.45904481410980225,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q9.jpg,short_sleeved_shirt,black,46.6%,0.9485607147216797,
 SM-Q9.jpg,trousers,black,49.8%,0.9291291236877441,
 -,-,-,-,-,Dress Code Passed ✅
 SM-Q23.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q31.jpg,short_sleeved_shirt,black,56.7%,0.8720086216926575,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q52.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q34.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q2.jpg,long_sleeved_shirt,black,53.4%,0.9466804265975952,
@@ -68,7 +68,7 @@ SM-Q2.jpg,trousers,black,64.6%,0.9081767797470093,
 -,-,-,-,-,Dress Code Passed ✅
 SM-Q39.jpg,short_sleeved_shirt,black,54.4%,0.2808447778224945,
 SM-Q39.jpg,vest,black,55.2%,0.27507641911506653,
--,-,-,-,-,Dress Code Violation (Missing detections)
+-,-,-,-,-,Dress Code Violation ❌
 SM-Q13.jpg,-,-,-,-,Dress Code Violation (No detections)
 SM-Q10.jpg,short_sleeved_shirt,black,44.5%,0.9598891735076904,
 SM-Q10.jpg,trousers,black,55.2%,0.48063862323760986,
