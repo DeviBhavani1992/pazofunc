@@ -43,7 +43,8 @@ def log(msg: str):
 # Configurations from Environment
 # -------------------------------------------------------------------
 MODEL_PATH = "/app/models/yolo11n.pt"
-FASHION_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/yolov11_fashipnpedia.pt"
+CLOTHING_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/deepfashion2_yolov8s-seg.pt"
+SHOE_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/yolov11_fashipnpedia.pt"
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DB", "yolov11db")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "yolov11-collection")
@@ -62,18 +63,25 @@ except Exception as e:
     traceback.print_exc()
     raise
 
-# Load Fashion model for dress code detection
-fashion_model = None
+# Load models for dress code detection
+clothing_model = None
+shoe_model = None
+
 try:
-    if os.path.exists(FASHION_MODEL_PATH):
-        log("🔄 Loading Fashion model...")
-        fashion_model = YOLO(FASHION_MODEL_PATH)
-        log("✅ Fashion model loaded successfully.")
-    else:
-        log("⚠️ Fashion model not found, dress code detection disabled")
+    if os.path.exists(CLOTHING_MODEL_PATH):
+        log("🔄 Loading Clothing model (DeepFashion2)...")
+        clothing_model = YOLO(CLOTHING_MODEL_PATH)
+        log("✅ Clothing model loaded successfully.")
 except Exception as e:
-    log(f"⚠️ Fashion model load failed: {e}")
-    fashion_model = None
+    log(f"⚠️ Clothing model load failed: {e}")
+
+try:
+    if os.path.exists(SHOE_MODEL_PATH):
+        log("🔄 Loading Shoe model (Fashionpedia)...")
+        shoe_model = YOLO(SHOE_MODEL_PATH)
+        log("✅ Shoe model loaded successfully.")
+except Exception as e:
+    log(f"⚠️ Shoe model load failed: {e}")
 
 # -------------------------------------------------------------------
 # Connect to MongoDB (Optional)
@@ -260,8 +268,8 @@ async def infer(request: Request):
 async def check_dresscode(request: Request):
     log("📥 Received /check_dresscode request")
     
-    if not fashion_model:
-        raise HTTPException(status_code=503, detail="Fashion model not available")
+    if not clothing_model or not shoe_model:
+        raise HTTPException(status_code=503, detail="Required models not available")
     
     # Parse JSON body
     try:
@@ -282,19 +290,19 @@ async def check_dresscode(request: Request):
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"Failed to download/process image: {ex}")
     
-    # Run fashion inference
     try:
-        model_results = fashion_model.predict(source=image, conf=0.25)
-        r = model_results[0]
-        names = r.names
-        
         shirt_color = None
         pant_color = None
         shoe_color = None
         
-        if len(r.boxes):
-            for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
-                label = names[int(cls)].lower()
+        # Run clothing detection (DeepFashion2 model)
+        clothing_results = clothing_model.predict(source=image, conf=0.25)
+        clothing_r = clothing_results[0]
+        clothing_names = clothing_r.names
+        
+        if len(clothing_r.boxes):
+            for box, cls, conf in zip(clothing_r.boxes.xyxy, clothing_r.boxes.cls, clothing_r.boxes.conf):
+                label = clothing_names[int(cls)].lower()
                 color_rgb, color_percent = get_dominant_color_with_percentage(img_cv, box)
                 color_name = get_color_name(color_rgb)
                 
@@ -302,22 +310,42 @@ async def check_dresscode(request: Request):
                     shirt_color = color_name
                 elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
                     pant_color = color_name
-                elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
+        
+        # Run shoe detection (Fashionpedia model)
+        shoe_results = shoe_model.predict(source=image, conf=0.25)
+        shoe_r = shoe_results[0]
+        shoe_names = shoe_r.names
+        
+        if len(shoe_r.boxes):
+            for box, cls, conf in zip(shoe_r.boxes.xyxy, shoe_r.boxes.cls, shoe_r.boxes.conf):
+                label = shoe_names[int(cls)].lower()
+                color_rgb, color_percent = get_dominant_color_with_percentage(img_cv, box)
+                color_name = get_color_name(color_rgb)
+                
+                if any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
                     shoe_color = color_name
         
-        # Dress code logic
-        if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
+        # Dress code logic - requires detection from both models
+        violations = []
+        if not shirt_color:
+            violations.append("shirt not detected")
+        elif shirt_color not in ["white", "black"]:
+            violations.append("shirt must be white or black")
+            
+        if not pant_color:
+            violations.append("pants not detected")
+        elif pant_color != "black":
+            violations.append("pants must be black")
+            
+        if not shoe_color:
+            violations.append("shoes not detected")
+        elif shoe_color != "black":
+            violations.append("shoes must be black")
+        
+        if not violations:
             status = "compliant"
             message = "Dress code is appropriate."
         else:
-            violations = []
-            if shirt_color not in ["white", "black"]:
-                violations.append("shirt must be white or black")
-            if pant_color != "black":
-                violations.append("pants must be black")
-            if shoe_color != "black":
-                violations.append("shoes must be black")
-            
             status = "non_compliant"
             message = f"Dress code violation: {', '.join(violations)}"
         
@@ -329,6 +357,10 @@ async def check_dresscode(request: Request):
                 "shirt": shirt_color,
                 "pant": pant_color,
                 "shoe": shoe_color
+            },
+            "models_used": {
+                "clothing": "deepfashion2_yolov8s-seg.pt",
+                "shoes": "yolov11_fashipnpedia.pt"
             },
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
         }

@@ -51,16 +51,17 @@ RUN pip install --no-cache-dir \
 # ======================================
 RUN mkdir -p /app/models
 COPY models/yolo11n.pt /app/models/yolo11n.pt
-COPY models/yoloe-11l-seg.pt /app/models/yoloe-11l-seg.pt
+COPY models/deepfashion2_yolov8s-seg.pt /app/models/deepfashion2_yolov8s-seg.pt
+COPY models/yolov11_fashipnpedia.pt /app/models/yolov11_fashipnpedia.pt
 # ======================================
 # Copy application scripts
 # ======================================
 COPY scripts/inference.py /app/inference.py
-COPY scripts/inference_yoloe.py /app/inference_yoloe.py
 
 EXPOSE 8000
 
 # ======================================
-# Start with Gunicorn (can serve both endpoints)
+# Start with Uvicorn (FastAPI server)
 # ======================================
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "inference:app"]
+RUN pip install --no-cache-dir uvicorn fastapi
+CMD ["uvicorn", "inference:app", "--host", "0.0.0.0", "--port", "8000"]
