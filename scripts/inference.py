@@ -20,6 +20,10 @@ import json
 import logging
 import imghdr
 import time
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+from collections import Counter
 
 # -------------------------------------------------------------------
 # App + Logging Setup
@@ -39,12 +43,13 @@ def log(msg: str):
 # Configurations from Environment
 # -------------------------------------------------------------------
 MODEL_PATH = "/app/models/yolo11n.pt"
+FASHION_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/yolov11_fashipnpedia.pt"
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DB", "yolov11db")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "yolov11-collection")
 
 # -------------------------------------------------------------------
-# Load YOLOv11 Model
+# Load YOLOv11 Models
 # -------------------------------------------------------------------
 try:
     log("🔄 Loading YOLOv11 model...")
@@ -56,6 +61,19 @@ except Exception as e:
     log(f"❌ Model load failed: {e}")
     traceback.print_exc()
     raise
+
+# Load Fashion model for dress code detection
+fashion_model = None
+try:
+    if os.path.exists(FASHION_MODEL_PATH):
+        log("🔄 Loading Fashion model...")
+        fashion_model = YOLO(FASHION_MODEL_PATH)
+        log("✅ Fashion model loaded successfully.")
+    else:
+        log("⚠️ Fashion model not found, dress code detection disabled")
+except Exception as e:
+    log(f"⚠️ Fashion model load failed: {e}")
+    fashion_model = None
 
 # -------------------------------------------------------------------
 # Connect to MongoDB (Optional)
@@ -86,6 +104,31 @@ def to_json_safe(obj):
     elif isinstance(obj, dict):
         return {k: to_json_safe(v) for k, v in obj.items()}
     return obj
+
+def get_dominant_color_with_percentage(image, box, k=3):
+    x1, y1, x2, y2 = map(int, box)
+    cropped = image[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return (0, 0, 0), 0.0
+    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+    pixels = cropped.reshape(-1, 3)
+    kmeans = KMeans(n_clusters=k, n_init=10, random_state=42).fit(pixels)
+    counts = Counter(kmeans.labels_)
+    total = sum(counts.values())
+    dominant_idx, dominant_count = counts.most_common(1)[0]
+    dominant_color = kmeans.cluster_centers_[dominant_idx]
+    percentage = (dominant_count / total) * 100
+    return dominant_color, percentage
+
+def get_color_name(rgb):
+    r, g, b = rgb
+    brightness = np.mean([r, g, b])
+    if brightness > 170 and abs(r - g) < 40 and abs(r - b) < 40:
+        return "white"
+    elif brightness < 90:
+        return "black"
+    else:
+        return "other"
 
 # -------------------------------------------------------------------
 # Health Check
@@ -209,6 +252,93 @@ async def infer(request: Request):
 
     log("✅ Returning inference result (200 OK).")
     return JSONResponse(content=safe_record, status_code=200)
+
+# -------------------------------------------------------------------
+# Dress Code Check Endpoint
+# -------------------------------------------------------------------
+@app.post("/check_dresscode")
+async def check_dresscode(request: Request):
+    log("📥 Received /check_dresscode request")
+    
+    if not fashion_model:
+        raise HTTPException(status_code=503, detail="Fashion model not available")
+    
+    # Parse JSON body
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    
+    blob_url = data.get("blob_url")
+    if not blob_url:
+        raise HTTPException(status_code=400, detail="Missing blob_url")
+    
+    # Download image
+    try:
+        image_response = requests.get(blob_url, timeout=20)
+        image_response.raise_for_status()
+        image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
+        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"Failed to download/process image: {ex}")
+    
+    # Run fashion inference
+    try:
+        model_results = fashion_model.predict(source=image, conf=0.25)
+        r = model_results[0]
+        names = r.names
+        
+        shirt_color = None
+        pant_color = None
+        shoe_color = None
+        
+        if len(r.boxes):
+            for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
+                label = names[int(cls)].lower()
+                color_rgb, color_percent = get_dominant_color_with_percentage(img_cv, box)
+                color_name = get_color_name(color_rgb)
+                
+                if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
+                    shirt_color = color_name
+                elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
+                    pant_color = color_name
+                elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
+                    shoe_color = color_name
+        
+        # Dress code logic
+        if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
+            status = "compliant"
+            message = "Dress code is appropriate."
+        else:
+            violations = []
+            if shirt_color not in ["white", "black"]:
+                violations.append("shirt must be white or black")
+            if pant_color != "black":
+                violations.append("pants must be black")
+            if shoe_color != "black":
+                violations.append("shoes must be black")
+            
+            status = "non_compliant"
+            message = f"Dress code violation: {', '.join(violations)}"
+        
+        result = {
+            "blob_url": blob_url,
+            "status": status,
+            "message": message,
+            "detections": {
+                "shirt": shirt_color,
+                "pant": pant_color,
+                "shoe": shoe_color
+            },
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+        }
+        
+        log("✅ Dress code check complete")
+        return JSONResponse(content=result, status_code=200)
+        
+    except Exception as ex:
+        log(f"❌ Dress code check failed: {ex}")
+        raise HTTPException(status_code=500, detail="Dress code check failed")
 
 # -------------------------------------------------------------------
 # Run locally
