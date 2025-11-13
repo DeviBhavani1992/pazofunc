@@ -17,7 +17,10 @@ logger = logging.getLogger("upload_image")
 # -------------------------------------------------------------------
 # CONFIGURATION
 # -------------------------------------------------------------------
-INFERENCE_BASE_URL = os.getenv("INFERENCE_BASE_URL", "http://localhost:8000")  # 👈 change if needed
+# INFERENCE_BASE_URL = os.getenv("INFERENCE_BASE_URL", "http://localhost:8000")  # 👈 change if needed
+INFERENCE_BASE_URL = os.getenv("YOLO_ENDPOINT")
+if not INFERENCE_BASE_URL:
+    raise ValueError("YOLO_ENDPOINT is not set in Function App configuration")
 BLOB_CONTAINER = os.getenv("BLOB_CONTAINER_NAME", "uploads")
 
 # -------------------------------------------------------------------

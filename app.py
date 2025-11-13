@@ -3,16 +3,16 @@ import requests
 import os
 from datetime import datetime
 import logging
-from io import BytesIO
+from io import BytesIO 
 
 # ---------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------
 AZURE_FUNCTION_KEY = os.getenv("AZURE_FUNCTION_KEY")
 # Example:
-# AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015.azurewebsites.net/api/pazofunc"
+AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image?code=F5MbFDI6XcXgRrbm7wX3JcyZdPzsOjswD2KCQROj9haWAzFuiNw41g=="
 
-BLOB_BASE_URL = "https://<your-storage-account-name>.blob.core.windows.net/<your-container-name>/"
+BLOB_BASE_URL = "https://pazouploadetest.blob.core.windows.net/images"
 
 # ---------------------------------------------------------------
 # LOGGER SETUP
@@ -73,10 +73,9 @@ if st.button("🚀 Submit All"):
                 filename_prefix = f"{category}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.name}"
                 logger.info(f"Uploading {filename_prefix} to Azure Function...")
 
-                files = {"file": (filename_prefix, file, file.type)}
-                data = {"category": category}
+                files = {"file": (filename_prefix, file.getvalue(), file.type)}
 
-                response = requests.post(AZURE_FUNCTION_URL, files=files, data=data, timeout=60)
+                response = requests.post(AZURE_FUNCTION_URL, files=files, timeout=60)
 
                 if response.status_code == 200:
                     result = response.json()
