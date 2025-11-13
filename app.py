@@ -8,8 +8,7 @@ from io import BytesIO
 # ---------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------
-AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL", "https://<your-function-app-name>.azurewebsites.net/api/<your-function-name>")
-
+AZURE_FUNCTION_KEY = os.getenv("AZURE_FUNCTION_KEY")
 # Example:
 # AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015.azurewebsites.net/api/pazofunc"
 
