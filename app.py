@@ -1,116 +1,129 @@
 import streamlit as st
 import requests
 import os
+from datetime import datetime
 import logging
-import json
+from io import BytesIO
 
+# ---------------------------------------------------------------
+# CONFIGURATION
+# ---------------------------------------------------------------
+AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL", "https://<your-function-app-name>.azurewebsites.net/api/<your-function-name>")
+
+# Example:
+# AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015.azurewebsites.net/api/pazofunc"
+
+BLOB_BASE_URL = "https://<your-storage-account-name>.blob.core.windows.net/<your-container-name>/"
+
+# ---------------------------------------------------------------
+# LOGGER SETUP
+# ---------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-AZURE_FUNCTION_URL = os.getenv("AZURE_FUNCTION_URL")
+st.set_page_config(page_title="YOLOv11 Inference Portal", page_icon="🧠", layout="centered")
 
-if not AZURE_FUNCTION_URL:
-    st.error("❌ AZURE_FUNCTION_URL environment variable is not set.")
-    st.stop()
+st.title("🧠 YOLOv11 Smart Detection Portal")
+st.markdown("Upload images for **Dress Code** or **Dustbin** analysis — then submit for inference.")
 
-st.title("📸 Upload Images to Azure Blob Storage with AI Analysis")
+# ---------------------------------------------------------------
+# SECTION 1: DRESS CODE UPLOAD
+# ---------------------------------------------------------------
+st.header("👔 Section 1: Dress Code Detection")
+dresscode_files = st.file_uploader(
+    "Upload one or more images for Dress Code check",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+    key="dresscode_uploader",
+)
 
-option = st.radio("Choose input method:", ["Upload Images", "Capture from Camera"])
+if dresscode_files:
+    st.write("Uploaded Dress Code Files:")
+    for file in dresscode_files:
+        st.markdown(f"- {file.name}")
 
-uploaded_images = []
-if option == "Upload Images":
-    uploaded_images = st.file_uploader("Choose images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-else:
-    camera_image = st.camera_input("Take a photo")
-    if camera_image:
-        uploaded_images = [camera_image]
+# ---------------------------------------------------------------
+# SECTION 2: DUSTBIN UPLOAD
+# ---------------------------------------------------------------
+st.header("🗑️ Section 2: Dustbin Detection")
+dustbin_files = st.file_uploader(
+    "Upload one or more images for Dustbin detection",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+    key="dustbin_uploader",
+)
 
-if uploaded_images:
-    cols = st.columns(len(uploaded_images))
-    for i, img in enumerate(uploaded_images):
-        with cols[i]:
-            st.image(img, caption=f"Image {i+1}", width=300)
+if dustbin_files:
+    st.write("Uploaded Dustbin Files:")
+    for file in dustbin_files:
+        st.markdown(f"- {file.name}")
 
-    if st.button("Upload Images 🚀"):
-        with st.spinner("Uploading to Azure..."):
+# ---------------------------------------------------------------
+# COMMON SUBMIT BUTTON
+# ---------------------------------------------------------------
+if st.button("🚀 Submit All"):
+    if not dresscode_files and not dustbin_files:
+        st.warning("Please upload at least one image in either section before submitting.")
+    else:
+        st.info("Uploading files and triggering inference... Please wait.")
+        results = []
+
+        # --- Helper: Upload to Azure Blob via Function App ---
+        def upload_and_infer(file, category):
             try:
-                uploaded_urls = []
+                filename_prefix = f"{category}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.name}"
+                logger.info(f"Uploading {filename_prefix} to Azure Function...")
 
-                for i, img in enumerate(uploaded_images):
-                    files = {'file': (img.name, img.getvalue(), img.type)}
-                    response = requests.post(AZURE_FUNCTION_URL, files=files)
+                files = {"file": (filename_prefix, file, file.type)}
+                data = {"category": category}
 
-                    if response.status_code == 200:
-                        result = response.json()
+                response = requests.post(AZURE_FUNCTION_URL, files=files, data=data, timeout=60)
 
-                        # Your Azure Function returns this format:
-                        # { "status": "success", "uploaded": ["https://..."], "count": N }
-                        if "uploaded" in result:
-                            uploaded_urls.extend(result["uploaded"])
-                        elif "blob_url" in result:
-                            uploaded_urls.append(result["blob_url"])
-                        else:
-                            st.warning(f"⚠️ Unexpected response for image {i+1}: {result}")
-                    else:
-                        st.error(f"❌ Upload failed for image {i+1}: {response.text}")
-                        st.stop()
-
-                if uploaded_urls:
-                    st.success(f"✅ {len(uploaded_urls)} images uploaded successfully!")
-
-                    for i, url in enumerate(uploaded_urls, 1):
-                        st.write(f"🌐 **Image {i} Blob URL:** {url}")
-
-                    # Save for analysis phase
-                    st.session_state.uploaded_urls = uploaded_urls
+                if response.status_code == 200:
+                    result = response.json()
+                    result["filename"] = filename_prefix
+                    result["category"] = category
+                    return result
                 else:
-                    st.error("❌ No uploaded URLs received from Function App.")
+                    logger.error(f"Inference failed: {response.text}")
+                    return {
+                        "filename": filename_prefix,
+                        "category": category,
+                        "status": "error",
+                        "message": response.text,
+                    }
 
             except Exception as e:
-                st.error(f"⚠️ Upload error: {str(e)}")
+                logger.exception("Error during upload/inference")
+                return {
+                    "filename": file.name,
+                    "category": category,
+                    "status": "error",
+                    "message": str(e),
+                }
 
-    # Show analysis section only if upload worked
-    if "uploaded_urls" in st.session_state and st.session_state.uploaded_urls:
-        st.subheader("🔍 Analyze Uploaded Images")
+        # --- Process Dresscode Files ---
+        for file in dresscode_files or []:
+            result = upload_and_infer(file, "dresscode")
+            results.append(result)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Check Dress Code 👔"):
-                with st.spinner("Analyzing dress code..."):
-                    try:
-                        for i, url in enumerate(st.session_state.uploaded_urls):
-                            dresscode_url = AZURE_FUNCTION_URL.replace('/upload_image', '/dresscode_analysis')
-                            response = requests.post(dresscode_url, json={'blob_url': url})
-                            
-                            if response.status_code == 200:
-                                result = response.json()
-                                status_icon = "✅" if result['status'] == "compliant" else "❌"
-                                st.write(f"{status_icon} Image {i+1}: {result['message']}")
-                                st.write(f"   Shirt: {result['detections']['shirt']}, Pant: {result['detections']['pant']}, Shoe: {result['detections']['shoe']}")
-                            else:
-                                st.error(f"❌ Analysis failed for image {i+1}: {response.text}")
-                    except Exception as e:
-                        st.error(f"⚠️ Error: {str(e)}")
+        # --- Process Dustbin Files ---
+        for file in dustbin_files or []:
+            result = upload_and_infer(file, "dustbin")
+            results.append(result)
 
-        with col2:
-            if st.button("Check Dustbin Detection 🗑️"):
-                with st.spinner("Detecting dustbins..."):
-                    try:
-                        for i, url in enumerate(st.session_state.uploaded_urls):
-                            dustbin_url = AZURE_FUNCTION_URL.replace('/upload_image', '/dustbin_detection')
-                            response = requests.post(dustbin_url, json={'blob_url': url})
-                            
-                            if response.status_code == 200:
-                                result = response.json()
-                                status_icon = "✅" if result['status'] == "dustbin_found" else "❌"
-                                st.write(f"{status_icon} Image {i+1}: {result['message']}")
-                                if result['detections']:
-                                    for det in result['detections']:
-                                        st.write(f"   - {det['label']}: {det['confidence']:.2f}")
-                            else:
-                                st.error(f"❌ Detection failed for image {i+1}: {response.text}")
-                    except Exception as e:
-                        st.error(f"⚠️ Error: {str(e)}")
+        st.success("✅ All images processed!")
+        st.subheader("📊 Inference Results")
 
-else:
-    st.info("📥 Please upload or capture images to proceed.")
+        for res in results:
+            st.markdown(f"### 🖼️ {res.get('filename')}")
+            if res.get("status") == "error":
+                st.error(res.get("message"))
+            else:
+                st.json(res)
+
+# ---------------------------------------------------------------
+# FOOTER
+# ---------------------------------------------------------------
+st.markdown("---")
+st.caption("Powered by YOLOv11 • Azure Functions • Streamlit UI")

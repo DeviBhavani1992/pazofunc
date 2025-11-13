@@ -10,284 +10,123 @@ import traceback
 import json
 from mimetypes import guess_type
 import imghdr
-import tempfile
-import cv2
-import numpy as np
-from sklearn.cluster import KMeans
-from collections import Counter
-from ultralytics import YOLO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("upload_image")
 
-# Load Models
-try:
-    dress_model = YOLO(os.path.join(os.path.dirname(__file__), "..", "models", "yolov11_fashipnpedia.pt"))
-    dustbin_model = YOLO(os.path.join(os.path.dirname(__file__), "..", "models", "dustbin_yolo11_best.pt"))
-except Exception as e:
-    logger.error(f"Model loading failed: {e}")
-    dress_model = None
-    dustbin_model = None
+# -------------------------------------------------------------------
+# CONFIGURATION
+# -------------------------------------------------------------------
+INFERENCE_BASE_URL = os.getenv("INFERENCE_BASE_URL", "http://localhost:8000")  # 👈 change if needed
+BLOB_CONTAINER = os.getenv("BLOB_CONTAINER_NAME", "uploads")
 
+# -------------------------------------------------------------------
+# HELPERS
+# -------------------------------------------------------------------
 def detect_image_content_type(filename: str, data: bytes) -> str:
     detected_type, _ = guess_type(filename)
     if detected_type and detected_type.startswith("image/"):
         return detected_type
     kind = imghdr.what(None, data)
-    if kind:
-        return f"image/{kind}"
-    return "image/jpeg"
+    return f"image/{kind or 'jpeg'}"
 
-def get_dominant_color_with_percentage(image, box, k=3):
-    x1, y1, x2, y2 = map(int, box)
-    cropped = image[y1:y2, x1:x2]
-    if cropped.size == 0:
-        return (0, 0, 0), 0.0
-    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-    pixels = cropped.reshape(-1, 3)
-    kmeans = KMeans(n_clusters=k, n_init=10, random_state=42).fit(pixels)
-    counts = Counter(kmeans.labels_)
-    total = sum(counts.values())
-    dominant_idx, dominant_count = counts.most_common(1)[0]
-    dominant_color = kmeans.cluster_centers_[dominant_idx]
-    percentage = (dominant_count / total) * 100
-    return dominant_color, percentage
+def call_inference(blob_url, mode):
+    """Call YOLO inference API (dresscode/dustbin/infer)"""
+    endpoint_map = {
+        "dresscode": f"{INFERENCE_BASE_URL}/check_dresscode",
+        "dustbin": f"{INFERENCE_BASE_URL}/dustbin_detect",
+        "general": f"{INFERENCE_BASE_URL}/infer",
+    }
+    endpoint = endpoint_map.get(mode, endpoint_map["general"])
+    logger.info(f"📡 Sending to inference endpoint: {endpoint}")
 
-def get_color_name(rgb):
-    r, g, b = rgb
-    brightness = np.mean([r, g, b])
-    if brightness > 170 and abs(r - g) < 40 and abs(r - b) < 40:
-        return "white"
-    elif brightness < 90:
-        return "black"
-    else:
-        return "other"
-
-def analyze_from_blob_url(blob_url, analysis_type):
     try:
-        # Download image from blob
-        response = requests.get(blob_url)
-        if response.status_code != 200:
-            return {"error": f"Failed to download image from {blob_url}"}
-        
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-            tmp_file.write(response.content)
-            image_path = tmp_file.name
-        logger.info(f"[DEBUG] Downloaded image size: {len(response.content)} bytes")
-        logger.info(f"[DEBUG] Image path exists: {os.path.exists(image_path)}")
-
-
-        img = cv2.imread(image_path)
-        logger.info(f"[DEBUG] Starting analysis type: {analysis_type}")
-        logger.info(f"[DEBUG] Dress model loaded: {dress_model is not None}")
-        logger.info(f"[DEBUG] Dustbin model loaded: {dustbin_model is not None}")
-
-        if analysis_type == "dresscode":
-            if not dress_model:
-                return {"error": "Dress code model not available"}
-            
-            model_results = dress_model.predict(image_path, conf=0.25)
-            r = model_results[0]
-            names = r.names
-
-            shirt_color = pant_color = shoe_color = None
-
-            if len(r.boxes):
-                for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
-                    label = names[int(cls)].lower()
-                    color_rgb, _ = get_dominant_color_with_percentage(img, box)
-                    color_name = get_color_name(color_rgb)
-
-                    if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
-                        shirt_color = color_name
-                    elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
-                        pant_color = color_name
-                    elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
-                        shoe_color = color_name
-
-            if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
-                status = "compliant"
-                message = "Dress code is appropriate."
-            else:
-                violations = []
-                if shirt_color not in ["white", "black"]:
-                    violations.append("shirt must be white or black")
-                if pant_color != "black":
-                    violations.append("pants must be black")
-                if shoe_color != "black":
-                    violations.append("shoes must be black")
-                status = "non_compliant"
-                message = f"Dress code violation: {', '.join(violations)}"
-            
-            result = {
-                "status": status,
-                "message": message,
-                "detections": {"shirt": shirt_color, "pant": pant_color, "shoe": shoe_color}
-            }
-
-        elif analysis_type == "dustbin":
-            if not dustbin_model:
-                return {"error": "Dustbin model not available"}
-            
-            model_results = dustbin_model.predict(image_path, conf=0.25)
-            r = model_results[0]
-            names = r.names
-
-            detections = []
-            if len(r.boxes):
-                for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
-                    detections.append({
-                        "label": names[int(cls)],
-                        "confidence": float(conf),
-                        "bbox": [float(x) for x in box.tolist()]
-                    })
-
-            result = {
-                "status": "dustbin_found" if detections else "no_dustbin",
-                "message": f"Found {len(detections)} dustbin(s)" if detections else "No dustbin detected",
-                "detections": detections
-            }
-
-        os.unlink(image_path)
-        return result
-
+        resp = requests.post(endpoint, json={"blob_url": blob_url}, timeout=180)
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            logger.error(f"❌ Inference API returned {resp.status_code}: {resp.text}")
+            return {"error": f"Inference failed ({resp.status_code})", "blob_url": blob_url}
     except Exception as e:
-        logger.error(f"Analysis failed: {e}")
-        return {"error": str(e)}
+        logger.error(f"⚠️ Inference request error: {e}")
+        return {"error": str(e), "blob_url": blob_url}
 
+# -------------------------------------------------------------------
+# MAIN FUNCTION ENTRY
+# -------------------------------------------------------------------
 def main(req: func.HttpRequest) -> func.HttpResponse:
     start_time = time.time()
-    logger.info("🔵 [START] Multi-function triggered")
+    logger.info("🚀 [Azure Function Triggered] YOLOv11 unified pipeline")
 
     try:
-        # Get all parameters and log them
-        all_params = dict(req.params)
-        logger.info(f"All request params: {all_params}")
-        
-        action = req.params.get('action', 'upload')
-        blob_url = req.params.get('blob_url')
-        
-        # Also check form data for parameters
-        if not blob_url:
-            try:
-                form_data = req.get_json() or {}
-                blob_url = form_data.get('blob_url')
-            except:
-                pass
-        
-        logger.info(f"Detected - Action: {action}, Blob URL: {blob_url}")
-        
-        # Force action detection for testing
-        if 'action' in all_params:
-            action = all_params['action']
-            logger.info(f"Forced action from params: {action}")
-
-        # If blob_url provided, analyze directly
-        if blob_url and action in ['dresscode', 'dustbin']:
-            logger.info(f"🔍 Analyzing blob URL: {blob_url}")
-            try:
-                analysis_result = analyze_from_blob_url(blob_url, action)
-                analysis_result["image"] = 1
-                analysis_result["blob_url"] = blob_url
-                
-                return func.HttpResponse(
-                    json.dumps({"results": [analysis_result]}),
-                    status_code=200,
-                    mimetype="application/json"
-                )
-            except Exception as e:
-                logger.error(f"Analysis error: {e}")
-                return func.HttpResponse(
-                    json.dumps({"error": f"Analysis failed: {str(e)}"}),
-                    status_code=500,
-                    mimetype="application/json"
-                )
-
-        # Get files from request only if no blob_url
-        if not blob_url:
-            files = req.files.getlist('files') or list(req.files.values())
-            if not files:
-                logger.error("❌ No files found and no blob_url provided")
-                return func.HttpResponse(json.dumps({"error": "No files uploaded"}), status_code=400, mimetype="application/json")
-        else:
-            files = []
-
-        # Get environment variables
         blob_conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        blob_container = os.getenv("BLOB_CONTAINER_NAME", "uploads")
-        
         if not blob_conn_str:
-            raise ValueError("Missing AZURE_STORAGE_CONNECTION_STRING")
+            raise ValueError("Missing AZURE_STORAGE_CONNECTION_STRING in environment variables")
 
-        # Initialize blob service
         blob_service = BlobServiceClient.from_connection_string(blob_conn_str)
-        container_client = blob_service.get_container_client(blob_container)
+        container_client = blob_service.get_container_client(BLOB_CONTAINER)
 
-        # Create container if it doesn't exist
         try:
             container_client.create_container()
         except Exception:
-            pass
+            pass  # ignore if already exists
 
-        # Upload files to blob storage
-        uploaded_urls = []
-        for i, file in enumerate(files):
+        # Handle files
+        files = req.files.getlist("file") or list(req.files.values())
+        if not files:
+            logger.warning("⚠️ No files received in request")
+            return func.HttpResponse(
+                json.dumps({"error": "No image files uploaded"}),
+                status_code=400,
+                mimetype="application/json",
+            )
+
+        results = []
+        for idx, file in enumerate(files, start=1):
             image_bytes = file.stream.read()
-            image_name = file.filename or f"image_{i+1}.jpg"
-            size_kb = round(len(image_bytes) / 1024, 1)
-            logger.info(f"📁 Uploading file: {image_name} ({size_kb} KB)")
-            
-            content_type = detect_image_content_type(image_name, image_bytes)
+            filename = file.filename
+            logger.info(f"📤 Uploading {filename} to blob storage...")
+
+            content_type = detect_image_content_type(filename, image_bytes)
             container_client.upload_blob(
-                name=image_name,
+                name=filename,
                 data=image_bytes,
                 overwrite=True,
-                content_settings=ContentSettings(content_type=content_type)
-            )
-            
-            blob_url = f"{container_client.url}/{image_name}"
-            uploaded_urls.append(blob_url)
-            logger.info(f"✅ Uploaded: {blob_url}")
-
-        # Perform analysis if requested
-        if action in ['dresscode', 'dustbin']:
-            results = []
-            for i, blob_url in enumerate(uploaded_urls, 1):
-                logger.info(f"🔍 Analyzing image {i}: {blob_url}")
-                analysis_result = analyze_from_blob_url(blob_url, action)
-                analysis_result["image"] = i
-                analysis_result["blob_url"] = blob_url
-                results.append(analysis_result)
-            
-            total_time = round(time.time() - start_time, 2)
-            logger.info(f"🏁 Analysis completed in {total_time}s")
-            
-            return func.HttpResponse(
-                json.dumps({"results": results}),
-                status_code=200,
-                mimetype="application/json"
+                content_settings=ContentSettings(content_type=content_type),
             )
 
-        # Default upload response
+            blob_url = f"{container_client.url}/{filename}"
+            logger.info(f"✅ Uploaded blob URL: {blob_url}")
+
+            # Detect inference type based on file prefix
+            if filename.lower().startswith("dresscode_"):
+                analysis_type = "dresscode"
+            elif filename.lower().startswith("dustbin_"):
+                analysis_type = "dustbin"
+            else:
+                analysis_type = "general"
+
+            # Call inference service
+            inference_result = call_inference(blob_url, analysis_type)
+            inference_result["blob_url"] = blob_url
+            inference_result["filename"] = filename
+            inference_result["type"] = analysis_type
+            results.append(inference_result)
+
         total_time = round(time.time() - start_time, 2)
-        logger.info(f"🏁 Upload completed in {total_time}s")
+        logger.info(f"🏁 Pipeline completed in {total_time}s for {len(results)} image(s)")
 
         return func.HttpResponse(
-            json.dumps({
-                "status": "success", 
-                "uploaded": uploaded_urls,
-                "count": len(uploaded_urls)
-            }),
+            json.dumps({"results": results, "processing_time": total_time}),
             status_code=200,
-            mimetype="application/json"
+            mimetype="application/json",
         )
 
-    except Exception as ex:
-        logger.error("🔥 Exception in function")
+    except Exception as e:
+        logger.error(f"🔥 Exception in pipeline: {e}")
         logger.error(traceback.format_exc())
         return func.HttpResponse(
-            json.dumps({"error": str(ex)}),
+            json.dumps({"error": str(e)}),
             status_code=500,
-            mimetype="application/json"
+            mimetype="application/json",
         )
