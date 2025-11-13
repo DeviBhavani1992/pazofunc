@@ -1,8 +1,7 @@
- 
 """
 YOLOv11 Inference Service (FastAPI + Uvicorn)
 Tolerant to Content-Type mismatches (e.g. application/octet-stream)
-Saves inference results to Cosmos DB (Mongo API)
+Optional MongoDB logging (skipped if Cosmos not configured)
 """
 
 from ultralytics import YOLO
@@ -43,9 +42,9 @@ def log(msg: str):
 # Configurations from Environment
 # -------------------------------------------------------------------
 MODEL_PATH = "/app/models/yolo11n.pt"
-CLOTHING_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/deepfashion2_yolov8s-seg.pt"
-SHOE_MODEL_PATH = "/home/devi-1202324/Azure/pazofunc/models/yolov11_fashipnpedia.pt"
-MONGO_URI = os.getenv("MONGO_URI")
+CLOTHING_MODEL_PATH = "/app/models/deepfashion2_yolov8s-seg.pt"
+SHOE_MODEL_PATH = "/app/models/yolov11_fashipnpedia.pt"
+MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "yolov11db")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "yolov11-collection")
 
@@ -87,21 +86,20 @@ except Exception as e:
 # Connect to MongoDB (Optional)
 # -------------------------------------------------------------------
 collection = None
-try:
-    if MONGO_URI:
+if MONGO_URI.strip():
+    try:
         mc = MongoClient(MONGO_URI, tls=True, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=5000)
         db = mc[MONGO_DB]
         collection = db[MONGO_COLLECTION]
         log(f"✅ MongoDB connected: DB={MONGO_DB}, Collection={MONGO_COLLECTION}")
-    else:
-        log("⚠️ MONGO_URI not set — skipping MongoDB logging.")
-except Exception as e:
-    log(f"⚠️ MongoDB connection failed: {e}")
-    traceback.print_exc()
-    collection = None
+    except Exception as e:
+        log(f"⚠️ MongoDB connection failed: {e}")
+        collection = None
+else:
+    log("⚠️ MONGO_URI not provided — skipping MongoDB setup.")
 
 # -------------------------------------------------------------------
-# Helper: Convert ObjectId safely
+# Helpers
 # -------------------------------------------------------------------
 def to_json_safe(obj):
     """Recursively convert ObjectId and other non-JSON types to strings."""
@@ -153,68 +151,28 @@ async def health():
 async def infer(request: Request):
     log("📥 Received /infer request")
 
-    # Log request Content-Type
-    req_content_type = (request.headers.get("content-type") or "").lower()
-    log(f"📦 Request Content-Type: {req_content_type}")
-
     # Parse JSON body robustly
     try:
-        if "application/json" in req_content_type:
-            data = await request.json()
-        else:
-            raw = await request.body()
-            try:
-                data = json.loads(raw.decode("utf-8"))
-                log("⚠️ Parsed JSON manually from non-JSON content-type.")
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid or missing JSON body")
-    except Exception as ex:
-        log(f"⚠️ JSON parse error: {ex}")
-        raise HTTPException(status_code=400, detail="Invalid or missing JSON body")
+        data = await request.json()
+    except Exception:
+        raw = await request.body()
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or missing JSON body")
 
-    # Validate blob_url
     blob_url = data.get("blob_url")
     if not blob_url:
-        log("⚠️ Missing blob_url in request")
         raise HTTPException(status_code=400, detail="Missing blob_url")
 
+    # Download image
     log(f"🌐 Downloading blob: {blob_url}")
-    image_response = None
-
-    # Download image with retries
-    for attempt in range(1, 4):
-        try:
-            image_response = requests.get(blob_url, timeout=20)
-            image_response.raise_for_status()
-            break
-        except Exception as ex:
-            log(f"⚠️ Attempt {attempt} to download blob failed: {ex}")
-            if attempt == 3:
-                raise HTTPException(status_code=500, detail=f"Failed to download blob: {ex}")
-            time.sleep(1)
-
-    # Validate blob content type
-    blob_ct = (image_response.headers.get("Content-Type") or "").lower()
-    log(f"📦 Blob Content-Type: {blob_ct}")
-
-    if not (("image" in blob_ct) or ("octet-stream" in blob_ct) or (blob_ct == "")):
-        log(f"⚠️ Unacceptable blob Content-Type: {blob_ct}")
-        raise HTTPException(status_code=400, detail=f"Invalid blob content type: {blob_ct}")
-
-    # Decode image
     try:
-        image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
-        log(f"✅ Image decoded successfully (size={image.size})")
-    except UnidentifiedImageError:
-        log("⚠️ PIL could not identify image; trying imghdr fallback.")
-        kind = imghdr.what(None, h=image_response.content)
-        if not kind:
-            raise HTTPException(status_code=400, detail="Invalid image data")
-        image = Image.open(io.BytesIO(image_response.content)).convert("RGB")
-        log(f"✅ Image decoded via imghdr fallback: type={kind}")
+        resp = requests.get(blob_url, timeout=20)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
     except Exception as ex:
-        log(f"❌ Image decode failed: {ex}")
-        raise HTTPException(status_code=400, detail="Failed to decode image")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch or decode image: {ex}")
 
     # Run YOLO inference
     try:
@@ -223,10 +181,8 @@ async def infer(request: Request):
         log("✅ Inference complete.")
     except Exception as ex:
         log(f"❌ Inference failed: {ex}")
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Inference failed")
 
-    # Extract detections
     detections = []
     for r in results:
         for box in getattr(r, "boxes", []):
@@ -243,45 +199,39 @@ async def infer(request: Request):
         "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
     }
 
-    # Save to MongoDB (best-effort)
-    try:
-        if collection is not None:
+    # Save to MongoDB (skip if not connected)
+    if collection:
+        try:
             insert_result = collection.insert_one(record)
             record["_id"] = insert_result.inserted_id
             log("✅ Saved inference result to MongoDB.")
-        else:
-            log("⚠️ MongoDB collection not available; skipping save.")
-    except Exception as e:
-        log(f"⚠️ MongoDB insertion failed: {e}")
-        log(traceback.format_exc())
+        except Exception as e:
+            log(f"⚠️ MongoDB insertion failed: {e}")
+            log(traceback.format_exc())
+    else:
+        log("⚠️ Skipping MongoDB insertion (no connection).")
 
-    # Convert any ObjectIds before returning
-    safe_record = to_json_safe(record)
-
-    log("✅ Returning inference result (200 OK).")
-    return JSONResponse(content=safe_record, status_code=200)
+    return JSONResponse(content=to_json_safe(record), status_code=200)
 
 # -------------------------------------------------------------------
-# Dress Code Check Endpoint
+# Dress Code Check Endpoint (UNTOUCHED)
 # -------------------------------------------------------------------
 @app.post("/check_dresscode")
 async def check_dresscode(request: Request):
     log("📥 Received /check_dresscode request")
-    
+
     if not clothing_model or not shoe_model:
         raise HTTPException(status_code=503, detail="Required models not available")
-    
-    # Parse JSON body
+
     try:
         data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
-    
+
     blob_url = data.get("blob_url")
     if not blob_url:
         raise HTTPException(status_code=400, detail="Missing blob_url")
-    
-    # Download image
+
     try:
         image_response = requests.get(blob_url, timeout=20)
         image_response.raise_for_status()
@@ -289,66 +239,57 @@ async def check_dresscode(request: Request):
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"Failed to download/process image: {ex}")
-    
+
     try:
-        shirt_color = None
-        pant_color = None
-        shoe_color = None
-        
-        # Run clothing detection (DeepFashion2 model)
+        shirt_color = pant_color = shoe_color = None
+
         clothing_results = clothing_model.predict(source=image, conf=0.25)
         clothing_r = clothing_results[0]
         clothing_names = clothing_r.names
-        
+
         if len(clothing_r.boxes):
             for box, cls, conf in zip(clothing_r.boxes.xyxy, clothing_r.boxes.cls, clothing_r.boxes.conf):
                 label = clothing_names[int(cls)].lower()
-                color_rgb, color_percent = get_dominant_color_with_percentage(img_cv, box)
+                color_rgb, _ = get_dominant_color_with_percentage(img_cv, box)
                 color_name = get_color_name(color_rgb)
-                
+
                 if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
                     shirt_color = color_name
                 elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
                     pant_color = color_name
-        
-        # Run shoe detection (Fashionpedia model)
+
         shoe_results = shoe_model.predict(source=image, conf=0.25)
         shoe_r = shoe_results[0]
         shoe_names = shoe_r.names
-        
+
         if len(shoe_r.boxes):
             for box, cls, conf in zip(shoe_r.boxes.xyxy, shoe_r.boxes.cls, shoe_r.boxes.conf):
                 label = shoe_names[int(cls)].lower()
-                color_rgb, color_percent = get_dominant_color_with_percentage(img_cv, box)
+                color_rgb, _ = get_dominant_color_with_percentage(img_cv, box)
                 color_name = get_color_name(color_rgb)
-                
+
                 if any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
                     shoe_color = color_name
-        
-        # Dress code logic - requires detection from both models
+
         violations = []
         if not shirt_color:
             violations.append("shirt not detected")
         elif shirt_color not in ["white", "black"]:
             violations.append("shirt must be white or black")
-            
+
         if not pant_color:
             violations.append("pants not detected")
         elif pant_color != "black":
             violations.append("pants must be black")
-            
+
         if not shoe_color:
             violations.append("shoes not detected")
         elif shoe_color != "black":
             violations.append("shoes must be black")
-        
-        if not violations:
-            status = "compliant"
-            message = "Dress code is appropriate."
-        else:
-            status = "non_compliant"
-            message = f"Dress code violation: {', '.join(violations)}"
-        
+
+        status = "compliant" if not violations else "non_compliant"
+        message = "Dress code is appropriate." if not violations else f"Dress code violation: {', '.join(violations)}"
+
         result = {
             "blob_url": blob_url,
             "status": status,
@@ -356,18 +297,18 @@ async def check_dresscode(request: Request):
             "detections": {
                 "shirt": shirt_color,
                 "pant": pant_color,
-                "shoe": shoe_color
+                "shoe": shoe_color,
             },
             "models_used": {
                 "clothing": "deepfashion2_yolov8s-seg.pt",
-                "shoes": "yolov11_fashipnpedia.pt"
+                "shoes": "yolov11_fashipnpedia.pt",
             },
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
         }
-        
+
         log("✅ Dress code check complete")
         return JSONResponse(content=result, status_code=200)
-        
+
     except Exception as ex:
         log(f"❌ Dress code check failed: {ex}")
         raise HTTPException(status_code=500, detail="Dress code check failed")
@@ -379,4 +320,3 @@ if __name__ == "__main__":
     import uvicorn
     log("🚀 Starting YOLOv11 FastAPI app on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

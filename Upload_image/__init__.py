@@ -74,9 +74,15 @@ def analyze_from_blob_url(blob_url, analysis_type):
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
             tmp_file.write(response.content)
             image_path = tmp_file.name
+        logger.info(f"[DEBUG] Downloaded image size: {len(response.content)} bytes")
+        logger.info(f"[DEBUG] Image path exists: {os.path.exists(image_path)}")
+
 
         img = cv2.imread(image_path)
-        
+        logger.info(f"[DEBUG] Starting analysis type: {analysis_type}")
+        logger.info(f"[DEBUG] Dress model loaded: {dress_model is not None}")
+        logger.info(f"[DEBUG] Dustbin model loaded: {dustbin_model is not None}")
+
         if analysis_type == "dresscode":
             if not dress_model:
                 return {"error": "Dress code model not available"}
@@ -155,14 +161,57 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logger.info("🔵 [START] Multi-function triggered")
 
     try:
+        # Get all parameters and log them
+        all_params = dict(req.params)
+        logger.info(f"All request params: {all_params}")
+        
         action = req.params.get('action', 'upload')
-        logger.info(f"Action requested: {action}")
+        blob_url = req.params.get('blob_url')
+        
+        # Also check form data for parameters
+        if not blob_url:
+            try:
+                form_data = req.get_json() or {}
+                blob_url = form_data.get('blob_url')
+            except:
+                pass
+        
+        logger.info(f"Detected - Action: {action}, Blob URL: {blob_url}")
+        
+        # Force action detection for testing
+        if 'action' in all_params:
+            action = all_params['action']
+            logger.info(f"Forced action from params: {action}")
 
-        # Get files from request
-        files = req.files.getlist('files') or list(req.files.values())
-        if not files:
-            logger.error("❌ No files found in request")
-            return func.HttpResponse(json.dumps({"error": "No files uploaded"}), status_code=400, mimetype="application/json")
+        # If blob_url provided, analyze directly
+        if blob_url and action in ['dresscode', 'dustbin']:
+            logger.info(f"🔍 Analyzing blob URL: {blob_url}")
+            try:
+                analysis_result = analyze_from_blob_url(blob_url, action)
+                analysis_result["image"] = 1
+                analysis_result["blob_url"] = blob_url
+                
+                return func.HttpResponse(
+                    json.dumps({"results": [analysis_result]}),
+                    status_code=200,
+                    mimetype="application/json"
+                )
+            except Exception as e:
+                logger.error(f"Analysis error: {e}")
+                return func.HttpResponse(
+                    json.dumps({"error": f"Analysis failed: {str(e)}"}),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+
+        # Get files from request only if no blob_url
+        if not blob_url:
+            files = req.files.getlist('files') or list(req.files.values())
+            if not files:
+                logger.error("❌ No files found and no blob_url provided")
+                return func.HttpResponse(json.dumps({"error": "No files uploaded"}), status_code=400, mimetype="application/json")
+        else:
+            files = []
 
         # Get environment variables
         blob_conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -183,9 +232,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
         # Upload files to blob storage
         uploaded_urls = []
-        for file in files:
+        for i, file in enumerate(files):
             image_bytes = file.stream.read()
-            image_name = file.filename
+            image_name = file.filename or f"image_{i+1}.jpg"
             size_kb = round(len(image_bytes) / 1024, 1)
             logger.info(f"📁 Uploading file: {image_name} ({size_kb} KB)")
             
@@ -225,7 +274,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logger.info(f"🏁 Upload completed in {total_time}s")
 
         return func.HttpResponse(
-            json.dumps({"status": "success", "uploaded": uploaded_urls}),
+            json.dumps({
+                "status": "success", 
+                "uploaded": uploaded_urls,
+                "count": len(uploaded_urls)
+            }),
             status_code=200,
             mimetype="application/json"
         )
