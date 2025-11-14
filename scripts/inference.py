@@ -19,7 +19,8 @@ app = FastAPI(title="YOLOv11 Unified Inference API", version="2.0")
 # MODEL PATHS
 # ---------------------------------------------------------------
 MODEL_PATHS = {
-    "dresscode": "/app/models/yolov11_fashipnpedia.pt",
+    "clothing": "/app/models/deepfashion2_yolov8s-seg.pt",
+    "shoes": "/app/models/yolov11_fashipnpedia.pt",
     "dustbin": "/app/models/dustbin_yolo11_best.pt",
     "general": "/app/models/yolo11n.pt",
 }
@@ -109,32 +110,40 @@ def run_general_inference(image: Image.Image, source_name: str):
 
 def run_dresscode_analysis(image: Image.Image, source_name: str):
     start_time = time.time()
-    model = get_model("dresscode")
+    
+    # Load both models
+    clothing_model = get_model("clothing")
+    shoe_model = get_model("shoes")
     
     # Convert PIL to OpenCV format
     img_array = np.array(image)
     img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     
-    results = model(image)
-    elapsed = round(time.time() - start_time, 2)
-    
-    r = results[0]
-    names = r.names
-    
     shirt_color = pant_color = shoe_color = None
     
-    if len(r.boxes):
-        for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
-            label = names[int(cls)].lower()
+    # Detect clothing (shirts, pants) using DeepFashion2 model
+    clothing_results = clothing_model(image)
+    if len(clothing_results[0].boxes):
+        for box, cls, conf in zip(clothing_results[0].boxes.xyxy, clothing_results[0].boxes.cls, clothing_results[0].boxes.conf):
+            label = clothing_results[0].names[int(cls)].lower()
             color_rgb, _ = get_dominant_color_with_percentage(img, box)
             color_name = get_color_name(color_rgb)
             
-            if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
+            if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee", "upper"]):
                 shirt_color = color_name
-            elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
+            elif any(k in label for k in ["pant", "trouser", "jean", "slacks", "lower"]):
                 pant_color = color_name
-            elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
-                shoe_color = color_name
+    
+    # Detect shoes using Fashionpedia model
+    shoe_results = shoe_model(image)
+    if len(shoe_results[0].boxes):
+        for box, cls, conf in zip(shoe_results[0].boxes.xyxy, shoe_results[0].boxes.cls, shoe_results[0].boxes.conf):
+            label = shoe_results[0].names[int(cls)].lower()
+            if any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
+                color_rgb, _ = get_dominant_color_with_percentage(img, box)
+                shoe_color = get_color_name(color_rgb)
+    
+    elapsed = round(time.time() - start_time, 2)
     
     if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
         status = "compliant"
