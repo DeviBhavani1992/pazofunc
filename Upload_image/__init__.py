@@ -63,7 +63,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         mongo_uri = os.getenv("MONGO_URI")
         mongo_db_name = os.getenv("MONGO_DB", "yolov11db")
         mongo_collection = os.getenv("MONGO_COLLECTION", "yolov11-collection")
-        yolo_endpoint = os.getenv("YOLO_ENDPOINT")  # e.g. https://yolov11-app.centralindia.azurecontainerapps.io
+        yolo_endpoint = os.getenv("YOLO_ENDPOINT")
 
         if not blob_conn_str:
             raise ValueError("Missing AZURE_STORAGE_CONNECTION_STRING")
@@ -71,12 +71,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logger.info(f"🌍 ENV: blob_container={blob_container}, YOLO_ENDPOINT={yolo_endpoint or 'MISSING'}")
 
         # -----------------------
-        # Upload to Azure Blob with correct Content-Type
+        # Upload to Azure Blob Storage
         # -----------------------
         blob_service = BlobServiceClient.from_connection_string(blob_conn_str)
         container_client = blob_service.get_container_client(blob_container)
 
-        # Create container if needed
         try:
             container_client.create_container()
         except Exception:
@@ -96,7 +95,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logger.info(f"✅ Uploaded to Blob: {blob_url}")
 
         # -----------------------
-        # Save metadata to MongoDB (optional)
+        # Save metadata to MongoDB
         # -----------------------
         if mongo_uri:
             try:
@@ -119,22 +118,26 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             logger.warning("⚠️ MONGO_URI not set — skipping Mongo logging.")
 
         # -----------------------
-        # Trigger YOLO inference
+        # Trigger YOLO inference (multipart upload)
         # -----------------------
         if yolo_endpoint:
-            payload = {"blob_url": blob_url}
-            headers = {"Content-Type": "application/json"}
+
+            files = {
+                "file": (image_name, image_bytes, content_type)
+            }
+
             success = False
 
-            for attempt in range(1, 4):
+            for attempt in range(1, 3):
                 try:
                     logger.info(f"🚀 Sending inference request (attempt {attempt}) → {yolo_endpoint}/infer")
+
                     response = requests.post(
                         f"{yolo_endpoint}/infer",
-                        json=payload,  # ensures proper JSON body
-                        headers=headers,
-                        timeout=30
+                        files=files,     # <-- IMPORTANT: multipart form data
+                        timeout=40
                     )
+
                     logger.info(f"📨 Status: {response.status_code}")
                     logger.debug(f"Response: {response.text[:400]}")
 
@@ -144,6 +147,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                         break
                     else:
                         logger.warning(f"⚠️ Inference failed (status {response.status_code}): {response.text}")
+
                 except Exception as e:
                     logger.warning(f"⚠️ Inference attempt {attempt} failed: {e}")
                     logger.debug(traceback.format_exc())
@@ -151,8 +155,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
             if not success:
                 logger.error("❌ All inference attempts failed.")
+
         else:
-            logger.warning("⚠️ YOLO_ENDPOINT not configured — skipping inference trigger.")
+            logger.warning("⚠️ YOLO_ENDPOINT not configured — skipping inference.")
 
         total_time = round(time.time() - start_time, 2)
         logger.info(f"🏁 Upload_image completed in {total_time}s")

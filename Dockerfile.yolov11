@@ -28,9 +28,9 @@ RUN pip install --no-cache-dir \
 
 # Install Ultralytics (for YOLOv11)
 RUN pip install --no-cache-dir ultralytics
+RUN pip install --no-cache-dir scikit-learn==1.7.2
 
-# Install YOLOE dependencies (open-vocab model)
-# YOLOE repo supports CPU but benefits from torchvision/text clip
+# YOLOE + core deps
 RUN pip install --no-cache-dir \
     open_clip_torch \
     transformers \
@@ -46,13 +46,18 @@ RUN pip install --no-cache-dir \
     gunicorn \
     pymongo
 
+# Install FastAPI + Uvicorn + multipart
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+
 # ======================================
 # Copy Pretrained Models (from local)
 # ======================================
 RUN mkdir -p /app/models
 COPY models/yolo11n.pt /app/models/yolo11n.pt
+COPY models/deepfashion2_yolov8s-seg.pt /app/models/deepfashion2_yolov8s-seg.pt
 COPY models/yolov11_fashipnpedia.pt /app/models/yolov11_fashipnpedia.pt
 COPY models/dustbin_yolo11_best.pt /app/models/dustbin_yolo11_best.pt
+
 # ======================================
 # Copy application scripts
 # ======================================
@@ -61,6 +66,7 @@ COPY scripts/inference.py /app/inference.py
 EXPOSE 8000
 
 # ======================================
-# Start with Gunicorn (can serve both endpoints)
+# Start with Gunicorn + Uvicorn Worker (ASGI for FastAPI)
 # ======================================
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "inference:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "inference:app"]
+
