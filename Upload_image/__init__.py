@@ -10,6 +10,12 @@ import traceback
 import json
 from mimetypes import guess_type
 import imghdr
+import tempfile
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+from collections import Counter
+from ultralytics import YOLO
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("upload_image")
@@ -24,6 +30,142 @@ if not INFERENCE_BASE_URL:
 BLOB_CONTAINER = os.getenv("BLOB_CONTAINER_NAME", "uploads")
 
 # -------------------------------------------------------------------
+# MODEL LOADING
+# -------------------------------------------------------------------
+try:
+    dress_model = YOLO(os.path.join(os.path.dirname(__file__), "..", "models", "yolov11_fashipnpedia.pt"))
+    logger.info("✅ Dress code model loaded")
+except Exception as e:
+    logger.error(f"❌ Dress code model loading failed: {e}")
+    dress_model = None
+
+try:
+    dustbin_model = YOLO(os.path.join(os.path.dirname(__file__), "..", "models", "dustbin_yolo11_best.pt"))
+    logger.info("✅ Dustbin model loaded")
+except Exception as e:
+    logger.error(f"❌ Dustbin model loading failed: {e}")
+    dustbin_model = None
+
+# -------------------------------------------------------------------
+# ANALYSIS FUNCTIONS
+# -------------------------------------------------------------------
+def get_dominant_color_with_percentage(image, box, k=3):
+    x1, y1, x2, y2 = map(int, box)
+    cropped = image[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return (0, 0, 0), 0.0
+    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+    pixels = cropped.reshape(-1, 3)
+    kmeans = KMeans(n_clusters=k, n_init=10, random_state=42).fit(pixels)
+    counts = Counter(kmeans.labels_)
+    total = sum(counts.values())
+    dominant_idx, dominant_count = counts.most_common(1)[0]
+    dominant_color = kmeans.cluster_centers_[dominant_idx]
+    percentage = (dominant_count / total) * 100
+    return dominant_color, percentage
+
+def get_color_name(rgb):
+    r, g, b = rgb
+    brightness = np.mean([r, g, b])
+    if brightness > 170 and abs(r - g) < 40 and abs(r - b) < 40:
+        return "white"
+    elif brightness < 90:
+        return "black"
+    else:
+        return "other"
+
+def analyze_dresscode(blob_url):
+    if not dress_model:
+        return {"error": "Dress code model not available"}
+    
+    try:
+        response = requests.get(blob_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download image from {blob_url}"}
+        
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+            tmp_file.write(response.content)
+            image_path = tmp_file.name
+
+        img = cv2.imread(image_path)
+        model_results = dress_model.predict(image_path, conf=0.25)
+        r = model_results[0]
+        names = r.names
+
+        shirt_color = pant_color = shoe_color = None
+
+        if len(r.boxes):
+            for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
+                label = names[int(cls)].lower()
+                color_rgb, _ = get_dominant_color_with_percentage(img, box)
+                color_name = get_color_name(color_rgb)
+
+                if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
+                    shirt_color = color_name
+                elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
+                    pant_color = color_name
+                elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
+                    shoe_color = color_name
+
+        if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
+            status = "compliant"
+            message = "Dress code is appropriate."
+        else:
+            violations = []
+            if shirt_color not in ["white", "black"]:
+                violations.append("shirt must be white or black")
+            if pant_color != "black":
+                violations.append("pants must be black")
+            if shoe_color != "black":
+                violations.append("shoes must be black")
+            status = "non_compliant"
+            message = f"Dress code violation: {', '.join(violations)}"
+
+        os.unlink(image_path)
+        return {
+            "status": status,
+            "message": message,
+            "detections": {"shirt": shirt_color, "pant": pant_color, "shoe": shoe_color}
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def analyze_dustbin(blob_url):
+    if not dustbin_model:
+        return {"error": "Dustbin model not available"}
+    
+    try:
+        response = requests.get(blob_url)
+        if response.status_code != 200:
+            return {"error": f"Failed to download image from {blob_url}"}
+        
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+            tmp_file.write(response.content)
+            image_path = tmp_file.name
+
+        model_results = dustbin_model.predict(image_path, conf=0.25)
+        r = model_results[0]
+        names = r.names
+
+        detections = []
+        if len(r.boxes):
+            for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
+                detections.append({
+                    "label": names[int(cls)],
+                    "confidence": float(conf),
+                    "bbox": [float(x) for x in box.tolist()]
+                })
+
+        os.unlink(image_path)
+        return {
+            "status": "dustbin_found" if detections else "no_dustbin",
+            "message": f"Found {len(detections)} dustbin(s)" if detections else "No dustbin detected",
+            "detections": detections
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# -------------------------------------------------------------------
 # HELPERS
 # -------------------------------------------------------------------
 def detect_image_content_type(filename: str, data: bytes) -> str:
@@ -34,25 +176,24 @@ def detect_image_content_type(filename: str, data: bytes) -> str:
     return f"image/{kind or 'jpeg'}"
 
 def call_inference(blob_url, mode):
-    """Call YOLO inference API (dresscode/dustbin/infer)"""
-    endpoint_map = {
-        "dresscode": f"{INFERENCE_BASE_URL}/check_dresscode",
-        "dustbin": f"{INFERENCE_BASE_URL}/dustbin_detect",
-        "general": f"{INFERENCE_BASE_URL}/infer",
-    }
-    endpoint = endpoint_map.get(mode, endpoint_map["general"])
-    logger.info(f"📡 Sending to inference endpoint: {endpoint}")
-
-    try:
-        resp = requests.post(endpoint, json={"blob_url": blob_url}, timeout=180)
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            logger.error(f"❌ Inference API returned {resp.status_code}: {resp.text}")
-            return {"error": f"Inference failed ({resp.status_code})", "blob_url": blob_url}
-    except Exception as e:
-        logger.error(f"⚠️ Inference request error: {e}")
-        return {"error": str(e), "blob_url": blob_url}
+    """Call local analysis functions"""
+    logger.info(f"🧠 Running {mode} analysis on {blob_url}")
+    
+    if mode == "dresscode":
+        return analyze_dresscode(blob_url)
+    elif mode == "dustbin":
+        return analyze_dustbin(blob_url)
+    else:
+        # For general inference, try external API if available
+        if INFERENCE_BASE_URL:
+            try:
+                endpoint = f"{INFERENCE_BASE_URL}/infer"
+                resp = requests.post(endpoint, json={"blob_url": blob_url}, timeout=180)
+                if resp.status_code == 200:
+                    return resp.json()
+            except Exception as e:
+                logger.error(f"⚠️ External inference failed: {e}")
+        return {"error": "General inference not available", "blob_url": blob_url}
 
 # -------------------------------------------------------------------
 # MAIN FUNCTION ENTRY

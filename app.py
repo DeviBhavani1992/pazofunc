@@ -10,7 +10,7 @@ from io import BytesIO
 # ---------------------------------------------------------------
 AZURE_FUNCTION_KEY = os.getenv("AZURE_FUNCTION_KEY")
 # Example:
-AZURE_FUNCTION_URL = ""
+AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image?code=F5MbFDI6XcXgRrbm7wX3JcyZdPzsOjswD2KCQROj9haWAzFuiNw41g=="
 
 BLOB_BASE_URL = "https://pazouploadetest.blob.core.windows.net/images"
 
@@ -75,7 +75,7 @@ if st.button("🚀 Submit All"):
 
                 files = {"file": (filename_prefix, file.getvalue(), file.type)}
 
-                response = requests.post(AZURE_FUNCTION_URL, files=files, timeout=60)
+                response = requests.post(AZURE_FUNCTION_URL, files=files, timeout=180)
 
                 if response.status_code == 200:
                     result = response.json()

@@ -1,56 +1,80 @@
 import os
-import io
 import time
-import torch
+import io
 import requests
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+from collections import Counter
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from PIL import Image
-from typing import Optional
+from typing import List, Optional
 import uvicorn
 from ultralytics import YOLO
 
-app = FastAPI(title="YOLOv11 Unified Inference API", version="1.1")
+app = FastAPI(title="YOLOv11 Unified Inference API", version="2.0")
 
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 # MODEL PATHS
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 MODEL_PATHS = {
-    "fashionpedia": "/home/devi-1202324/Azure/pazofunc/models/yolov11_fashipnpedia.pt",  # shoes
-    "deepfashion2": "/home/devi-1202324/Azure/pazofunc/models/deepfashion2_yolov8s-seg.pt",  # shirts/pants
-    "dustbin": "/home/devi-1202324/Azure/pazofunc/models/dustbin_yolo11_best.pt",
-    "general": "/home/devi-1202324/Azure/pazofunc/models/yolo11m-seg.pt",
+    "dresscode": "/app/models/yolov11_fashipnpedia.pt",
+    "dustbin": "/app/models/dustbin_yolo11_best.pt",
+    "general": "/app/models/yolo11n.pt",
 }
 
 MODEL_CACHE = {}
 
-
-# -------------------------------------------------------------------
-# MODEL LOADING
-# -------------------------------------------------------------------
 def get_model(model_key: str):
     if model_key not in MODEL_PATHS:
-        raise ValueError(f"❌ Invalid model key: {model_key}")
+        raise ValueError(f"Invalid model key '{model_key}'")
     if model_key not in MODEL_CACHE:
         model_path = MODEL_PATHS[model_key]
         print(f"🔄 Loading model: {model_path}")
         MODEL_CACHE[model_key] = YOLO(model_path)
     return MODEL_CACHE[model_key]
 
+# ---------------------------------------------------------------
+# COLOR ANALYSIS FUNCTIONS
+# ---------------------------------------------------------------
+def get_dominant_color_with_percentage(image, box, k=3):
+    x1, y1, x2, y2 = map(int, box)
+    cropped = image[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return (0, 0, 0), 0.0
+    cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+    pixels = cropped.reshape(-1, 3)
+    kmeans = KMeans(n_clusters=k, n_init=10, random_state=42).fit(pixels)
+    counts = Counter(kmeans.labels_)
+    total = sum(counts.values())
+    dominant_idx, dominant_count = counts.most_common(1)[0]
+    dominant_color = kmeans.cluster_centers_[dominant_idx]
+    percentage = (dominant_count / total) * 100
+    return dominant_color, percentage
 
-# -------------------------------------------------------------------
+def get_color_name(rgb):
+    r, g, b = rgb
+    brightness = np.mean([r, g, b])
+    if brightness > 170 and abs(r - g) < 40 and abs(r - b) < 40:
+        return "white"
+    elif brightness < 90:
+        return "black"
+    else:
+        return "other"
+
+# ---------------------------------------------------------------
 # REQUEST MODELS
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
 class BlobRequest(BaseModel):
     blob_url: str
 
-
-# -------------------------------------------------------------------
-# INFERENCE HELPER
-# -------------------------------------------------------------------
-def run_inference(model_key: str, image: Image.Image, source_name: str):
+# ---------------------------------------------------------------
+# INFERENCE FUNCTIONS
+# ---------------------------------------------------------------
+def run_general_inference(image: Image.Image, source_name: str):
     start_time = time.time()
-    model = get_model(model_key)
+    model = get_model("general")
     results = model(image)
     elapsed = round(time.time() - start_time, 2)
 
@@ -68,15 +92,14 @@ def run_inference(model_key: str, image: Image.Image, source_name: str):
                 "confidence": round(conf, 2)
             })
 
-    # Summaries
     class_counts = {}
     for d in detections:
         class_counts[d["class"]] = class_counts.get(d["class"], 0) + 1
 
     return {
         "status": "success",
-        "model": os.path.basename(MODEL_PATHS[model_key]),
-        "inference_type": model_key,
+        "model": os.path.basename(MODEL_PATHS["general"]),
+        "inference_type": "general",
         "filename": source_name,
         "processing_time_sec": elapsed,
         "total_detections": len(detections),
@@ -84,89 +107,138 @@ def run_inference(model_key: str, image: Image.Image, source_name: str):
         "detections": detections,
     }
 
+def run_dresscode_analysis(image: Image.Image, source_name: str):
+    start_time = time.time()
+    model = get_model("dresscode")
+    
+    # Convert PIL to OpenCV format
+    img_array = np.array(image)
+    img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    
+    results = model(image)
+    elapsed = round(time.time() - start_time, 2)
+    
+    r = results[0]
+    names = r.names
+    
+    shirt_color = pant_color = shoe_color = None
+    
+    if len(r.boxes):
+        for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
+            label = names[int(cls)].lower()
+            color_rgb, _ = get_dominant_color_with_percentage(img, box)
+            color_name = get_color_name(color_rgb)
+            
+            if any(k in label for k in ["shirt", "blouse", "top", "t-shirt", "tee"]):
+                shirt_color = color_name
+            elif any(k in label for k in ["pant", "trouser", "jean", "slacks"]):
+                pant_color = color_name
+            elif any(k in label for k in ["shoe", "footwear", "sneaker", "boot"]):
+                shoe_color = color_name
+    
+    if (shirt_color in ["white", "black"]) and (pant_color == "black") and (shoe_color == "black"):
+        status = "compliant"
+        message = "Dress code is appropriate."
+    else:
+        violations = []
+        if shirt_color not in ["white", "black"]:
+            violations.append("shirt must be white or black")
+        if pant_color != "black":
+            violations.append("pants must be black")
+        if shoe_color != "black":
+            violations.append("shoes must be black")
+        status = "non_compliant"
+        message = f"Dress code violation: {', '.join(violations)}"
+    
+    return {
+        "status": status,
+        "message": message,
+        "detections": {"shirt": shirt_color, "pant": pant_color, "shoe": shoe_color},
+        "processing_time_sec": elapsed,
+        "filename": source_name
+    }
 
-# -------------------------------------------------------------------
-# HELPERS
-# -------------------------------------------------------------------
-def fetch_image_from_blob(blob_url: str) -> Image.Image:
-    resp = requests.get(blob_url, timeout=30)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+def run_dustbin_detection(image: Image.Image, source_name: str):
+    start_time = time.time()
+    model = get_model("dustbin")
+    results = model(image)
+    elapsed = round(time.time() - start_time, 2)
+    
+    r = results[0]
+    names = r.names
+    
+    detections = []
+    if len(r.boxes):
+        for box, cls, conf in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
+            detections.append({
+                "label": names[int(cls)],
+                "confidence": float(conf),
+                "bbox": [float(x) for x in box.tolist()]
+            })
+    
+    status = "dustbin_found" if detections else "no_dustbin"
+    message = f"Found {len(detections)} dustbin(s)" if detections else "No dustbin detected"
+    
+    return {
+        "status": status,
+        "message": message,
+        "detections": detections,
+        "total_dustbins": len(detections),
+        "processing_time_sec": elapsed,
+        "filename": source_name
+    }
 
-
-# -------------------------------------------------------------------
-# ROUTES
-# -------------------------------------------------------------------
+# ---------------------------------------------------------------
+# API ENDPOINTS
+# ---------------------------------------------------------------
 @app.post("/infer")
 async def general_infer(file: UploadFile = File(...)):
-    """Generic YOLO model inference"""
+    """General YOLOv11 inference"""
     image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-    return run_inference("general", image, file.filename)
-
+    result = run_general_inference(image, file.filename)
+    return result
 
 @app.post("/check_dresscode")
-async def check_dresscode(req: Optional[BlobRequest] = None, file: Optional[UploadFile] = None):
-    """
-    Dresscode detection:
-      - Uses DeepFashion2 for shirts/pants
-      - Uses Fashionpedia for shoes
-    """
+async def check_dresscode(file: Optional[UploadFile] = None, req: Optional[BlobRequest] = None):
+    """Dress code analysis"""
     image = None
     source_name = "unknown"
-
-    # Handle input
+    
     if file:
         source_name = file.filename
         image = Image.open(io.BytesIO(await file.read())).convert("RGB")
     elif req and req.blob_url:
-        image = fetch_image_from_blob(req.blob_url)
+        resp = requests.get(req.blob_url)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
         source_name = os.path.basename(req.blob_url)
     else:
         return {"error": "No image provided"}
-
-    # Run two models
-    fashionpedia_result = run_inference("fashionpedia", image, source_name)
-    deepfashion_result = run_inference("deepfashion2", image, source_name)
-
-    combined = {
-        "status": "success",
-        "inference_type": "dresscode",
-        "results": {
-            "fashionpedia": fashionpedia_result,
-            "deepfashion2": deepfashion_result
-        }
-    }
-    return combined
-
+    
+    return run_dresscode_analysis(image, source_name)
 
 @app.post("/dustbin_detect")
-async def dustbin_detect(req: Optional[BlobRequest] = None, file: Optional[UploadFile] = None):
+async def dustbin_detect(file: Optional[UploadFile] = None, req: Optional[BlobRequest] = None):
     """Dustbin detection"""
     image = None
     source_name = "unknown"
-
+    
     if file:
         source_name = file.filename
         image = Image.open(io.BytesIO(await file.read())).convert("RGB")
     elif req and req.blob_url:
-        image = fetch_image_from_blob(req.blob_url)
+        resp = requests.get(req.blob_url)
+        resp.raise_for_status()
+        image = Image.open(io.BytesIO(resp.content)).convert("RGB")
         source_name = os.path.basename(req.blob_url)
     else:
         return {"error": "No image provided"}
+    
+    return run_dustbin_detection(image, source_name)
 
-    return run_inference("dustbin", image, source_name)
-
-
-# -------------------------------------------------------------------
-# HEALTH CHECK
-# -------------------------------------------------------------------
 @app.get("/health")
 async def health():
     return {"status": "healthy", "loaded_models": list(MODEL_CACHE.keys())}
 
-
-# -------------------------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run("inference:app", host="0.0.0.0", port=8000, reload=True)
