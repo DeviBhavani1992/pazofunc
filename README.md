@@ -256,3 +256,19 @@ For support and questions:
 ---
 
 **Powered by YOLOv11 • Azure Functions • Streamlit UI**
+
+Pazo App → Azure Function → Blob (input image)  
+           → Container App (YOLO) → Blob (detected output image)
+           → Write Detection Log → ADLS Gen2 (CSV/Parquet)
+                                      ↳ storeId/year/month/day/class/
+                                           detection_data.parquet
+           → Synapse Serverless → Read ADLS files with external table
+
+
+📱 User / App
+    ↓ (1. Upload Image)
+🌐 Container App (YOLO)
+    → Save inference image to BLOB
+    ↓ (2. Auto internal call)
+⚙ Azure Function
+    → Save detection logs to ADLS
