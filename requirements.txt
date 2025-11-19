@@ -5,4 +5,7 @@ requests
 pillow
 numpy
 psutil
+python-dotenv
+streamlit
+
 

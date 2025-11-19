@@ -1,74 +1,92 @@
 import streamlit as st
 import requests
-import os
 from datetime import datetime
 import logging
 
-# ---------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------
-
 AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image"
-AZURE_FUNCTION_KEY = "0j57J9uuzUDQ8VOJK9ElE3oPff4_NPBmjEkxwIBDjdRFAzFub_o5sQ=="  # REQUIRED
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-st.set_page_config(
-    page_title="Smart Detection Portal",
-    page_icon="🧠",
-    layout="centered"
-)
+st.set_page_config(page_title="Pazo AI Portal", page_icon="✨")
 
-st.title("🧠 Smart Detection Portal")
-st.markdown("Upload images for analysis and receive structured AI evaluation.")
+st.title("✨ AI Image Analysis Portal")
+st.markdown("Upload images for Dress Code / Dustbin / Lights Check AI evaluation.")
 
-# ---------------------------------------------------------------
-# SECTION 1: DRESS CODE UPLOAD
-# ---------------------------------------------------------------
-st.header("👔 Dress Code Check")
-dresscode_files = st.file_uploader(
-    "Upload one or more images for Dress Code validation",
-    type=["jpg", "jpeg", "png"],
+# -----------------------------
+# SECTION: DRESSCODE
+# -----------------------------
+st.header("👔 Dress Code")
+dress_files = st.file_uploader(
+    "Upload Dress Code Images",
     accept_multiple_files=True,
-    key="dresscode_uploader",
+    type=["jpg", "jpeg", "png"],
+    key="dress"
 )
 
-if dresscode_files:
-    st.write("Uploaded Files:")
-    for file in dresscode_files:
-        st.markdown(f"- {file.name}")
-
-
-# ---------------------------------------------------------------
-# SECTION 2: DUSTBIN UPLOAD
-# ---------------------------------------------------------------
-st.header("🗑 Dustbin Condition Check")
+# -----------------------------
+# SECTION: DUSTBIN
+# -----------------------------
+st.header("🗑️ Dustbin Check")
 dustbin_files = st.file_uploader(
-    "Upload one or more images for Dustbin validation",
-    type=["jpg", "jpeg", "png"],
+    "Upload Dustbin Images",
     accept_multiple_files=True,
-    key="dustbin_uploader",
+    type=["jpg", "jpeg", "png"],
+    key="dustbin"
 )
 
-if dustbin_files:
-    st.write("Uploaded Files:")
-    for file in dustbin_files:
-        st.markdown(f"- {file.name}")
-
-
-# ---------------------------------------------------------------
-# SECTION 3: LIGHTS CHECK
-# ---------------------------------------------------------------
-st.header("💡 Lights ON/OFF Check")
-lightscheck_files = st.file_uploader(
-    "Upload one or more images for Lights ON/OFF verification",
-    type=["jpg", "jpeg", "png"],
+# -----------------------------
+# SECTION: LIGHT CHECK
+# -----------------------------
+st.header("💡 Light Check")
+light_files = st.file_uploader(
+    "Upload Lights Check Images",
     accept_multiple_files=True,
-    key="lightscheck_uploader",
+    type=["jpg", "jpeg", "png"],
+    key="lights"
 )
 
-if lightscheck_files:
-    st.write("Uploaded Files:")
-    for file in lightscheck_files:
-        st.markdown(f"- {file
+# -----------------------------
+# SUBMIT ALL
+# -----------------------------
+if st.button("🚀 Submit for Analysis"):
+
+    all_files = [
+        ("dresscode", dress_files),
+        ("dustbin", dustbin_files),
+        ("lightscheck", light_files)
+    ]
+
+    results = []
+
+    for category, files in all_files:
+        if not files:
+            continue
+
+        for file in files:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"{category}_{timestamp}_{file.name}"
+
+            files_payload = {
+                "file": (fname, file.getvalue(), file.type)
+            }
+
+            endpoint = f"{AZURE_FUNCTION_URL}?category={category}"
+
+            response = requests.post(endpoint, files=files_payload)
+
+            if response.status_code == 200:
+                results.append(response.json())
+            else:
+                results.append({
+                    "filename": fname,
+                    "category": category,
+                    "status": "error",
+                    "message": response.text
+                })
+
+    st.success("Completed!")
+
+    st.subheader("📊 Results")
+    for r in results:
+        st.json(r)
