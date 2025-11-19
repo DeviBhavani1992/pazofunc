@@ -3,20 +3,17 @@ import requests
 import os
 from datetime import datetime
 import logging
-from io import BytesIO 
+from io import BytesIO
 
 # ---------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------
-AZURE_FUNCTION_KEY = os.getenv("AZURE_FUNCTION_KEY")
-# Example:
-AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image?code=F5MbFDI6XcXgRrbm7wX3JcyZdPzsOjswD2KCQROj9haWAzFuiNw41g=="
 
-BLOB_BASE_URL = "https://pazouploadetest.blob.core.windows.net/images"
+# IMPORTANT ❗ — category is sent in querystring on each request
+AZURE_FUNCTION_URL = (
+    "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image"
+)
 
-# ---------------------------------------------------------------
-# LOGGER SETUP
-# ---------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -67,25 +64,34 @@ if st.button("🚀 Submit All"):
         st.info("Uploading files and triggering inference... Please wait.")
         results = []
 
-        # --- Helper: Upload to Azure Blob via Function App ---
+        # -----------------------------------------------------------
+        # Helper function for uploading and triggering inference
+        # -----------------------------------------------------------
         def upload_and_infer(file, category):
             try:
-                filename_prefix = f"{category}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.name}"
-                logger.info(f"Uploading {filename_prefix} to Azure Function...")
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{category}_{timestamp}_{file.name}"
 
-                files = {"file": (filename_prefix, file.getvalue(), file.type)}
+                logger.info(f"Uploading {filename} to Azure Function...")
 
-                response = requests.post(AZURE_FUNCTION_URL, files=files, timeout=180)
+                files_payload = {
+                    "file": (filename, file.getvalue(), file.type or "image/jpeg")
+                }
+
+                # Send category along with request
+                endpoint_url = f"{AZURE_FUNCTION_URL}?category={category}"
+
+                response = requests.post(endpoint_url, files=files_payload, timeout=180)
 
                 if response.status_code == 200:
                     result = response.json()
-                    result["filename"] = filename_prefix
+                    result["filename"] = filename
                     result["category"] = category
                     return result
                 else:
                     logger.error(f"Inference failed: {response.text}")
                     return {
-                        "filename": filename_prefix,
+                        "filename": filename,
                         "category": category,
                         "status": "error",
                         "message": response.text,
@@ -100,15 +106,13 @@ if st.button("🚀 Submit All"):
                     "message": str(e),
                 }
 
-        # --- Process Dresscode Files ---
+        # PROCESS DRESSCODE FILES
         for file in dresscode_files or []:
-            result = upload_and_infer(file, "dresscode")
-            results.append(result)
+            results.append(upload_and_infer(file, "dresscode"))
 
-        # --- Process Dustbin Files ---
+        # PROCESS DUSTBIN FILES
         for file in dustbin_files or []:
-            result = upload_and_infer(file, "dustbin")
-            results.append(result)
+            results.append(upload_and_infer(file, "dustbin"))
 
         st.success("✅ All images processed!")
         st.subheader("📊 Inference Results")

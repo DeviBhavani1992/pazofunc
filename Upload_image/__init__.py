@@ -1,182 +1,151 @@
-# Complete __init__.py for Azure Function App
-# Includes:
-# 1. Parametric category routing (folder -> endpoint)
-# 2. Upload to Blob
-# 3. Call Inference Container App
-# 4. Log to ADLS/Synapse (Parquet)
-# 5. Return JSON response to Streamlit
-
 import logging
-import json
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from azure.storage.filedatalake import DataLakeServiceClient
-import os
+from pymongo import MongoClient
 import requests
+import os
+import time
 from datetime import datetime
-from io import BytesIO
-import pandas as pd
+import traceback
+import json
+from mimetypes import guess_type
+import imghdr
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ---------------------------------------------------------------------
-# CONFIG
+# ENVIRONMENT VARIABLES
 # ---------------------------------------------------------------------
 
-# Default Store ID
-DEFAULT_STORE_ID = "CHN01"
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB", "pazo")
+MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "inference_logs")
 
-# Blob Storage Config
-BLOB_CONN_STRING = os.getenv("BLOB_CONNECTION_STRING")
-BLOB_CONTAINER = "uploads"
-BLOB_BASE_URL = os.getenv("BLOB_BASE_URL")  # example: https://xxxx.blob.core.windows.net/uploads
+AZURE_STORAGE_CONN = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+AZURE_BLOB_CONTAINER = os.getenv("BLOB_CONTAINER", "uploads")
 
-blob_service = BlobServiceClient.from_connection_string(BLOB_CONN_STRING)
-blob_client_container = blob_service.get_container_client(BLOB_CONTAINER)
+YOLO_ENDPOINT = os.getenv("YOLO_ENDPOINT")  # e.g. https://yolo-app.azurecontainerapps.io
+if not YOLO_ENDPOINT:
+    raise Exception("Missing YOLO_ENDPOINT environment variable!")
 
-# ADLS / Synapse Config
-ADLS_CONN_STRING = os.getenv("ADLS_CONNECTION_STRING")
-ADLS_FS_NAME = "raw"  # e.g., raw zone
-adls_service = DataLakeServiceClient.from_connection_string(ADLS_CONN_STRING)
-adls_fs = adls_service.get_file_system_client(ADLS_FS_NAME)
+YOLO_ENDPOINT = YOLO_ENDPOINT.rstrip("/")
 
-# Inference Service URLs (Container App)
+# ---------------------------------------------------------------------
+# INFERENCE URLS (AUTO BUILT FROM YOLO_ENDPOINT)
+# ---------------------------------------------------------------------
 INFERENCE_ENDPOINTS = {
-    "dresscode": os.getenv("INFERENCE_DRESSCODE_URL"),
-    "dustbin": os.getenv("INFERENCE_DUSTBIN_URL"),
-    "default": os.getenv("INFERENCE_DEFAULT_URL")
+    "dresscode": f"{YOLO_ENDPOINT}/check_dresscode",
+    "dustbin": f"{YOLO_ENDPOINT}/dustbin_detect",
+    "default": f"{YOLO_ENDPOINT}/infer",
+    "general": f"{YOLO_ENDPOINT}/infer",
 }
 
 # ---------------------------------------------------------------------
-# LOG WRITER (ADLS PARQUET)
+# DATABASE SETUP
+# ---------------------------------------------------------------------
+mongo_client = MongoClient(MONGO_URI)
+mongo_db = mongo_client[MONGO_DB]
+log_collection = mongo_db[MONGO_COLLECTION]
+
+# ---------------------------------------------------------------------
+# HELPERS
 # ---------------------------------------------------------------------
 
-def write_log_to_synapse(store_id, category, filename, input_blob_url, inference_blob_url, inference_result):
-    """
-    Writes upload + inference metadata into ADLS in Parquet format
-    Partitioned by year/month/day for Synapse compatibility.
-    """
+def upload_to_blob(container, blob_name, data, content_type):
     try:
-        now = datetime.utcnow()
-        year = now.strftime("%Y")
-        month = now.strftime("%m")
-        day = now.strftime("%d")
+        blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONN)
+        blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
 
-        path = f"logs/{store_id}/{category}/year={year}/month={month}/day={day}/log.parquet"
+        content_settings = ContentSettings(content_type=content_type)
 
-        df = pd.DataFrame([
-            {
-                "timestamp": now.isoformat(),
-                "store_id": store_id,
-                "category": category,
-                "filename": filename,
-                "input_blob_url": input_blob_url,
-                "inference_blob_url": inference_blob_url,
-                "inference_result": inference_result
-            }
-        ])
+        blob_client.upload_blob(data, overwrite=True, content_settings=content_settings)
 
-        file_client = adls_fs.get_file_client(path)
-
-        # Try reading existing file
-        try:
-            existing = file_client.download_file().readall()
-            old_df = pd.read_parquet(BytesIO(existing))
-            final_df = pd.concat([old_df, df], ignore_index=True)
-        except Exception:
-            final_df = df
-
-        output = BytesIO()
-        final_df.to_parquet(output, index=False)
-        output.seek(0)
-
-        file_client.upload_data(output.read(), overwrite=True)
-        logging.info(f"Log written to ADLS: {path}")
-
+        return blob_client.url
     except Exception as e:
-        logging.error(f"ADLS Log Write Failed: {str(e)}")
+        logging.error(f"Blob upload error: {str(e)}")
+        raise
+
+
+def route_inference(category):
+    """Return correct YOLO inference endpoint based on category."""
+    return INFERENCE_ENDPOINTS.get(category.lower(), INFERENCE_ENDPOINTS["default"])
 
 
 # ---------------------------------------------------------------------
-# MAIN RUN METHOD
+# MAIN HTTP TRIGGER ENTRY
 # ---------------------------------------------------------------------
 
-def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Upload_image Function Triggered")
+async def main(req: func.HttpRequest) -> func.HttpResponse:
+    start_time = time.time()
 
     try:
+        category = req.params.get("category", "default")
+
         file = req.files.get("file")
         if not file:
-            return func.HttpResponse("No file received", status_code=400)
-
-        category = req.params.get("category", "default").lower()
-        store_id = req.params.get("store_id", DEFAULT_STORE_ID)
-
-        if category not in INFERENCE_ENDPOINTS:
-            category = "default"
+            return func.HttpResponse("Image file missing", status_code=400)
 
         filename = file.filename
-        prefix = category
-        blob_path = f"{prefix}/{filename}"
+        content = file.stream.read()
 
-        # Upload original to Blob
-        blob_client = blob_client_container.get_blob_client(blob_path)
-        blob_client.upload_blob(file.stream.read(), overwrite=True)
+        # Guess MIME type
+        mime_type, _ = guess_type(filename)
+        if not mime_type:
+            mime_type = "application/octet-stream"
 
-        input_blob_url = f"{BLOB_BASE_URL}/{blob_path}"
+        # Validate image
+        if not imghdr.what(None, h=content):
+            return func.HttpResponse("Invalid image", status_code=400)
 
-        # ------------------------------------------------------------------
-        # CALL INFERENCE SERVICE
-        # ------------------------------------------------------------------
-
-        inference_url = INFERENCE_ENDPOINTS[category]
-        files = {"file": (filename, file.stream, "application/octet-stream")}
-
-        infer_response = requests.post(inference_url, files=files)
-
-        if infer_response.status_code != 200:
-            return func.HttpResponse(json.dumps({
-                "status": "inference_failed", "error": infer_response.text
-            }), status_code=500)
-
-        infer_json = infer_response.json()
-        inference_result = infer_json.get("result")
-        inference_image_bytes = infer_json.get("image_bytes")
-
-        # Upload inference image
-        inference_blob_path = f"{prefix}/inferenced_{filename}"
-        inference_blob_client = blob_client_container.get_blob_client(inference_blob_path)
-        inference_blob_client.upload_blob(BytesIO(bytes(inference_image_bytes)), overwrite=True)
-
-        inference_blob_url = f"{BLOB_BASE_URL}/{inference_blob_path}"
-
-        # ------------------------------------------------------------------
-        # WRITE LOG TO ADLS
-        # ------------------------------------------------------------------
-
-        write_log_to_synapse(
-            store_id,
-            prefix,
-            filename,
-            input_blob_url,
-            inference_blob_url,
-            inference_result
+        # Upload to Blob
+        blob_path = f"{category}/{filename}"
+        blob_url = upload_to_blob(
+            AZURE_BLOB_CONTAINER,
+            blob_path,
+            content,
+            mime_type
         )
 
-        # ------------------------------------------------------------------
-        # PREPARE RESPONSE
-        # ------------------------------------------------------------------
+        # Select inference endpoint
+        inference_url = route_inference(category)
 
-        response = {
-            "status": "success",
-            "uploaded_to": input_blob_url,
+        logging.info(f"Calling YOLO endpoint: {inference_url}")
+
+        response = requests.post(
+            inference_url,
+            files={"file": (filename, content, mime_type)},
+            timeout=120
+        )
+
+        inference_result = response.json() if response.ok else {"error": response.text}
+
+        # Log to MongoDB
+        log_entry = {
+            "timestamp": datetime.utcnow(),
+            "filename": filename,
+            "category": category,
+            "blob_url": blob_url,
+            "inference_url": inference_url,
             "inference_result": inference_result,
-            "input_image": input_blob_url,
-            "inferenced_image": inference_blob_url,
-            "category": prefix,
-            "filename": filename
+            "execution_time_sec": round(time.time() - start_time, 3)
         }
 
-        return func.HttpResponse(json.dumps(response), status_code=200, mimetype="application/json")
+        log_collection.insert_one(log_entry)
+
+        return func.HttpResponse(
+            json.dumps({
+                "status": "success",
+                "file_url": blob_url,
+                "inference": inference_result
+            }),
+            status_code=200,
+            mimetype="application/json"
+        )
 
     except Exception as e:
-        logging.error(str(e))
-        return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500)
+        logging.error(traceback.format_exc())
+        return func.HttpResponse(
+            json.dumps({"error": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
