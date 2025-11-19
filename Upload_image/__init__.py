@@ -1,143 +1,135 @@
 import logging
 import azure.functions as func
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from pymongo import MongoClient
-import requests
 import os
-import time
-from datetime import datetime
-import traceback
 import json
-from mimetypes import guess_type
-import imghdr
+import traceback
+import requests
+from datetime import datetime
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# -------------------------------------------------------------
+# ENVIRONMENT SETTINGS
+# -------------------------------------------------------------
+AZURE_BLOB_CONNECTION_STRING = os.getenv("AZURE_BLOB_CONNECTION_STRING")
+BLOB_CONTAINER_NAME = os.getenv("BLOB_CONTAINER_NAME", "uploads")
 
-# ---------------------------------------------------------------------
-# ENVIRONMENT VARIABLES
-# ---------------------------------------------------------------------
+GEMMA_ENDPOINT = os.getenv("GEMMA_ENDPOINT")
+GEMMA_API_KEY = os.getenv("GEMMA_API_KEY")
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "pazo")
-MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "inference_logs")
+# -------------------------------------------------------------
+# DEFAULT PROMPTS
+# -------------------------------------------------------------
+DEFAULT_PROMPTS = {
+    "dresscode": """
+From this image validate the dress code:
+- Shirt : Black or White
+- Pant : Black
+- Shoe : Must be present (color optional)
+- Beards : Not allowed
+If criteria fail → say "dress code inappropriate".
+Finally give a score (0–100).
+""",
 
-AZURE_STORAGE_CONN = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-AZURE_BLOB_CONTAINER = os.getenv("BLOB_CONTAINER", "uploads")
+    "dustbin": """
+Check the image for:
+- Is dustbin present?
+- Is it clean or not?
+- Does it have poly cover inside?
+- Is garbage not overflowing?
+Give final score (0–100).
+""",
 
-YOLO_ENDPOINT = os.getenv("YOLO_ENDPOINT")  # e.g. https://yolo-app.azurecontainerapps.io
-if not YOLO_ENDPOINT:
-    raise Exception("Missing YOLO_ENDPOINT environment variable!")
-
-YOLO_ENDPOINT = YOLO_ENDPOINT.rstrip("/")
-
-# ---------------------------------------------------------------------
-# INFERENCE URLS (AUTO BUILT FROM YOLO_ENDPOINT)
-# ---------------------------------------------------------------------
-INFERENCE_ENDPOINTS = {
-    "dresscode": f"{YOLO_ENDPOINT}/check_dresscode",
-    "dustbin": f"{YOLO_ENDPOINT}/dustbin_detect",
-    "default": f"{YOLO_ENDPOINT}/infer",
-    "general": f"{YOLO_ENDPOINT}/infer",
+    "lightscheck": """
+Check whether all the lights in the image are ON.
+If ON → give high score.
+If OFF → give low score.
+Provide score (0–100).
+"""
 }
 
-# ---------------------------------------------------------------------
-# DATABASE SETUP
-# ---------------------------------------------------------------------
-mongo_client = MongoClient(MONGO_URI)
-mongo_db = mongo_client[MONGO_DB]
-log_collection = mongo_db[MONGO_COLLECTION]
-
-# ---------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------
-
-def upload_to_blob(container, blob_name, data, content_type):
+# -------------------------------------------------------------
+# MAIN FUNCTION
+# -------------------------------------------------------------
+def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONN)
-        blob_client = blob_service.get_blob_client(container=container, blob=blob_name)
+        logging.info("Processing request...")
 
-        content_settings = ContentSettings(content_type=content_type)
+        # -------------------------------------------------------------
+        # READ PARAMETERS
+        # -------------------------------------------------------------
+        category = req.params.get("category")
+        if not category:
+            return func.HttpResponse("Missing category", status_code=400)
 
-        blob_client.upload_blob(data, overwrite=True, content_settings=content_settings)
+        if category not in DEFAULT_PROMPTS:
+            return func.HttpResponse("Invalid category provided", status_code=400)
 
-        return blob_client.url
-    except Exception as e:
-        logging.error(f"Blob upload error: {str(e)}")
-        raise
-
-
-def route_inference(category):
-    """Return correct YOLO inference endpoint based on category."""
-    return INFERENCE_ENDPOINTS.get(category.lower(), INFERENCE_ENDPOINTS["default"])
-
-
-# ---------------------------------------------------------------------
-# MAIN HTTP TRIGGER ENTRY
-# ---------------------------------------------------------------------
-
-async def main(req: func.HttpRequest) -> func.HttpResponse:
-    start_time = time.time()
-
-    try:
-        category = req.params.get("category", "default")
-
+        # -------------------------------------------------------------
+        # READ IMAGE FILE
+        # -------------------------------------------------------------
         file = req.files.get("file")
         if not file:
             return func.HttpResponse("Image file missing", status_code=400)
 
         filename = file.filename
-        content = file.stream.read()
-
-        # Guess MIME type
-        mime_type, _ = guess_type(filename)
-        if not mime_type:
-            mime_type = "application/octet-stream"
-
-        # Validate image
-        if not imghdr.what(None, h=content):
-            return func.HttpResponse("Invalid image", status_code=400)
-
-        # Upload to Blob
         blob_path = f"{category}/{filename}"
-        blob_url = upload_to_blob(
-            AZURE_BLOB_CONTAINER,
-            blob_path,
-            content,
-            mime_type
+
+        # -------------------------------------------------------------
+        # UPLOAD IMAGE TO BLOB
+        # -------------------------------------------------------------
+        blob_service = BlobServiceClient.from_connection_string(AZURE_BLOB_CONNECTION_STRING)
+        container_client = blob_service.get_container_client(BLOB_CONTAINER_NAME)
+
+        container_client.upload_blob(
+            name=blob_path,
+            data=file.stream.read(),
+            overwrite=True,
+            content_settings=ContentSettings(content_type=file.content_type)
         )
 
-        # Select inference endpoint
-        inference_url = route_inference(category)
+        blob_url = container_client.get_blob_client(blob_path).url
 
-        logging.info(f"Calling YOLO endpoint: {inference_url}")
+        # -------------------------------------------------------------
+        # LLM – SEND IMAGE + PROMPT
+        # -------------------------------------------------------------
+        prompt = DEFAULT_PROMPTS[category]
 
-        response = requests.post(
-            inference_url,
-            files={"file": (filename, content, mime_type)},
-            timeout=120
-        )
-
-        inference_result = response.json() if response.ok else {"error": response.text}
-
-        # Log to MongoDB
-        log_entry = {
-            "timestamp": datetime.utcnow(),
-            "filename": filename,
-            "category": category,
-            "blob_url": blob_url,
-            "inference_url": inference_url,
-            "inference_result": inference_result,
-            "execution_time_sec": round(time.time() - start_time, 3)
+        payload = {
+            "prompt": prompt,
+            "image_url": blob_url
         }
 
-        log_collection.insert_one(log_entry)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GEMMA_API_KEY}"
+        }
 
+        response = requests.post(GEMMA_ENDPOINT, json=payload, headers=headers)
+        llm_output = response.json()
+
+        # -------------------------------------------------------------
+        # SAVE RESULT JSON BACK TO ADLS
+        # -------------------------------------------------------------
+        result_filename = f"{category}/{filename.split('.')[0]}_result.json"
+
+        container_client.upload_blob(
+            name=result_filename,
+            data=json.dumps(llm_output, indent=4),
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/json")
+        )
+
+        # -------------------------------------------------------------
+        # RETURN RESPONSE
+        # -------------------------------------------------------------
         return func.HttpResponse(
             json.dumps({
-                "status": "success",
-                "file_url": blob_url,
-                "inference": inference_result
-            }),
+                "message": "Success",
+                "category": category,
+                "image_blob_url": blob_url,
+                "result_blob": result_filename,
+                "llm_output": llm_output
+            }, indent=4),
             status_code=200,
             mimetype="application/json"
         )
