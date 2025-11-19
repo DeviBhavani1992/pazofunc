@@ -3,7 +3,8 @@ import requests
 from datetime import datetime
 import logging
 
-AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image"
+# Correct function URL (already contains ?code= )
+AZURE_FUNCTION_URL = "https://cavin-pazzo-20251015-ci.azurewebsites.net/api/Upload_image?code=F5MbFDI6XcXgRrbm7wX3JcyZdPzsOjswD2KCQROj9haWAzFuiNw41g=="
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -71,7 +72,8 @@ if st.button("🚀 Submit for Analysis"):
                 "file": (fname, file.getvalue(), file.type)
             }
 
-            endpoint = f"{AZURE_FUNCTION_URL}?category={category}"
+            # IMPORTANT FIX — add &category instead of ?category
+            endpoint = f"{AZURE_FUNCTION_URL}&category={category}"
 
             response = requests.post(endpoint, files=files_payload)
 
