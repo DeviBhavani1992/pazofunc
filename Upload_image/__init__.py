@@ -1,23 +1,23 @@
 import logging
 import azure.functions as func
 import json
-import requests
 import os
+import requests
 from datetime import datetime
-from .adls_utils import upload_json_to_adls
+from adls_utils import upload_json_to_adls
 
-# ===============================================
-# OLLAMA URL
-# ===============================================
+# ==============================
+# OLLAMA ENDPOINT
+# ==============================
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 
-# ===============================================
-# STRICT JSON RULE
-# ===============================================
+# ==============================
+# STRICT JSON RULE ENFORCEMENT
+# ==============================
 JSON_RULE = """
 You MUST respond ONLY in valid JSON.
-Do NOT include explanations or extra text.
-Format:
+Do NOT include explanations, markdown, or extra text.
+Output must match this format:
 {
   "status": "pass or fail",
   "summary": "short summary",
@@ -29,32 +29,92 @@ Format:
 }
 """
 
-# ===============================================
-# MAIN HTTP TRIGGER
-# ===============================================
+# ==============================
+# CATEGORY PROMPTS
+# ==============================
+CATEGORY_PROMPTS = {
+    "dresscode": """
+Analyze employee dress code from image:
+- Shirt must be black or white
+- Pants must be black
+- Shoes must be present
+- Beard should not be present
+List violations and give rating.
+Return JSON only.
+""",
+    "dustbin": """
+Analyze dustbin:
+- Is dustbin visible?
+- Clean or untidy?
+- Poly cover present?
+- Overflowing or OK?
+Return JSON only.
+""",
+    "lightscheck": """
+Analyze lighting in the room:
+- Which lights are ON?
+- Which lights are OFF?
+- Any dim or faulty lights?
+Return JSON only.
+""",
+    "floorcheck": """
+Analyze floor cleanliness:
+- Hair, dust, stains, spills, marks
+- Is the floor dry and clean?
+Give a cleanliness rating.
+Return JSON only.
+""",
+    "nailpolishtray": """
+Analyze nail polish tray:
+- Are bottles arranged neatly?
+- Any bottles missing caps?
+- Any spills or stains?
+Return JSON only.
+""",
+    "shampoobottles": """
+Analyze shampoo bottle arrangement:
+- Are bottles arranged properly?
+- Any messy surroundings?
+- Any spills or stains?
+Return JSON only.
+""",
+    "restroomcheck": """
+Analyze restroom:
+- Is toilet clean?
+- Is basin clean?
+- Any stains or hair?
+- Handwash available?
+- Room freshener available?
+Give rating.
+Return JSON only.
+"""
+}
+
+
+# ==============================
+# MAIN FUNCTION
+# ==============================
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Azure Function received request.")
+    logging.info("Azure Function received a request.")
 
     try:
-        # 1. Read category
         category = req.params.get("category")
+        store_id = req.params.get("store_id")
+
         if not category:
             return func.HttpResponse(
-                json.dumps({"error": "Missing category"}),
+                json.dumps({"error": "Missing ?category="}),
                 mimetype="application/json",
                 status_code=400
             )
 
-        # 2. Read store_id
-        store_id = req.params.get("store_id")
         if not store_id:
             return func.HttpResponse(
-                json.dumps({"error": "Missing store_id"}),
+                json.dumps({"error": "Missing ?store_id="}),
                 mimetype="application/json",
                 status_code=400
             )
 
-        # 3. Read file
         file = req.files.get("file")
         if not file:
             return func.HttpResponse(
@@ -63,40 +123,42 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=400
             )
 
-        # Save file locally
-        local_path = f"/tmp/{file.filename}"
-        with open(local_path, "wb") as f:
+        # Save temp file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tmp_path = f"/tmp/{file.filename}"
+        with open(tmp_path, "wb") as f:
             f.write(file.read())
 
-        logging.info(f"Saved uploaded file: {local_path}")
+        logging.info(f"Saved uploaded file at {tmp_path}")
 
-        # Prompt prep
-        prompt = build_prompt(category)
-        ai_result = run_moondream_inference(prompt, local_path)
+        # Build prompt
+        prompt = CATEGORY_PROMPTS.get(category, "General analysis. Return JSON only.")
+        ai_result = run_moondream_inference(prompt, tmp_path)
 
-        # Build final payload
-        final_payload = {
+        # Upload to ADLS
+        adls_path = upload_json_to_adls(
+            data=ai_result,
+            category=category,
+            timestamp=timestamp,
+            store_id=store_id
+        )
+
+        response_payload = {
             "filename": file.filename,
-            "store_id": store_id,
             "category": category,
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "success",
+            "status": "success" if "error" not in ai_result else "fail",
+            "adls_path": adls_path,
             "result": ai_result
         }
 
-        # 4. Upload JSON results to ADLS
-        adls_path = upload_json_to_adls(store_id, category, final_payload)
-
-        final_payload["adls_path"] = adls_path
-
         return func.HttpResponse(
-            json.dumps(final_payload),
+            json.dumps(response_payload),
             mimetype="application/json",
             status_code=200
         )
 
     except Exception as e:
-        logging.exception("Crash inside function")
+        logging.exception("Function failed")
         return func.HttpResponse(
             json.dumps({"error": str(e)}),
             mimetype="application/json",
@@ -104,104 +166,25 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-# ===============================================
-# CATEGORY PROMPTS
-# ===============================================
-def build_prompt(category):
-
-    prompts = {
-        "dresscode": """
-        Analyze employee dress code:
-        - Shirt black/white?
-        - Pants black?
-        - Shoes present?
-        - Beard present?
-        List violations.
-        Return JSON only.
-        """,
-
-        "dustbin": """
-        Analyze dustbin cleanliness:
-        - Visible?
-        - Clean or messy?
-        - Poly cover present?
-        - Overflowing?
-        Return JSON only.
-        """,
-
-        "lightscheck": """
-        Analyze lights:
-        - Lights ON/OFF
-        - Dim or faulty lights
-        Return JSON only.
-        """,
-
-        "floorcheck": """
-        Floor analysis:
-        - Dust, hair, stains
-        - Wet/dry
-        Give cleanliness rating.
-        Return JSON only.
-        """,
-
-        "nailpolishtray": """
-        Nail polish tray:
-        - Bottles arranged?
-        - Caps missing?
-        - Spills?
-        Return JSON only.
-        """,
-
-        "shampoobottles": """
-        Shampoo bottle rack:
-        - Arrangement
-        - Messy surroundings
-        - Spills
-        Return JSON only.
-        """,
-
-        "restroomcheck": """
-        Restroom analysis:
-        - Toilet clean?
-        - Basin clean?
-        - Stains/hair?
-        - Handwash?
-        - Freshener?
-        Return JSON only.
-        """
-    }
-
-    return prompts.get(category, "General analysis. Return JSON only.")
-
-
-# ===============================================
-# MOONDREAM INFERENCE
-# ===============================================
+# ==============================
+# AI INFERENCE
+# ==============================
 def run_moondream_inference(prompt, image_path):
-
-    final_prompt = f"""
+    complete_prompt = f"""
 {prompt}
 
-Image Path: {image_path}
+Image File Path: {image_path}
 
 {JSON_RULE}
 """
-
     payload = {
         "model": "moondream:latest",
-        "prompt": final_prompt,
+        "prompt": complete_prompt,
         "stream": False
     }
 
     try:
         response = requests.post(OLLAMA_URL, json=payload)
-    except Exception as e:
-        return {"error": "Ollama unreachable", "details": str(e)}
-
-    try:
         return response.json()
-    except:
-        try:
-            return json.loads(response.text)
-        except:
-            return {"error": "Invalid JSON from model", "raw": response.text}
+    except Exception as e:
+        return {"error": "Unable to reach OLLAMA server", "details": str(e)}
