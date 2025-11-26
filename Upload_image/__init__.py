@@ -1,142 +1,203 @@
 import logging
 import azure.functions as func
-import requests
 import json
+import requests
 import os
 
-# Get environment variables
-GEMMA_ENDPOINT = os.getenv("GEMMA_ENDPOINT")
-GEMMA_API_KEY = os.getenv("GEMMA_API_KEY")
+# ===============================================
+#  OLLAMA ENDPOINT (supports VM + local testing)
+# ===============================================
+# If running INSIDE Azure VM → localhost works
+# If running from LOCAL laptop → set env OLLAMA_URL=http://104.211.66.125:11434/api/generate
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 
-def run_gemma_inference(image_url, prompt):
-    try:
-        logging.info("Preparing payload for Gemma inference...")
-        payload = {
-            "model": "gemma:2b",
-            "prompt": f"{prompt}\n\nImage URL: {image_url}",
-            "stream": False
-        }
+# ===============================================
+# STRICT JSON RULE ENFORCEMENT
+# ===============================================
+JSON_RULE = """
+You MUST respond ONLY in valid JSON.
+Do NOT include explanations, markdown, or extra text.
+Output must match this format:
+{
+  "status": "pass or fail",
+  "summary": "short summary",
+  "score": "number or N/A",
+  "details": {
+    "issues_found": [],
+    "comments": ""
+  }
+}
+"""
 
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if GEMMA_API_KEY:
-            headers["Authorization"] = f"Bearer {GEMMA_API_KEY}"
-
-        logging.info(f"Sending request to Gemma endpoint: {GEMMA_ENDPOINT}/api/generate")
-        logging.info(f"Payload snippet: {json.dumps(payload)[:300]} ...")
-
-        resp = requests.post(
-            f"{GEMMA_ENDPOINT}/api/generate",
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=240
-        )
-
-        logging.info(f"Gemma status code: {resp.status_code}")
-        logging.info(f"Gemma response snippet: {resp.text[:300]} ...")
-
-        resp.raise_for_status()
-        return resp.json()
-
-    except requests.exceptions.Timeout:
-        logging.error("Gemma call TIMED OUT")
-        return {"error": "timeout"}
-
-    except Exception as e:
-        logging.error(f"Gemma call failed: {e}")
-        return {"error": str(e)}
-
-
+# ===============================================
+# MAIN FUNCTION — ENTRY POINT
+# ===============================================
 def main(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("Azure Function received a request.")
+
     try:
-        category = req.params.get('category')
+        # 1. Validate category
+        category = req.params.get("category")
         if not category:
             return func.HttpResponse(
-                "Missing 'category' query parameter.",
+                json.dumps({"error": "Missing ?category="}),
+                mimetype="application/json",
                 status_code=400
             )
 
-        file = req.files.get('file')
+        # 2. Validate file
+        file = req.files.get("file")
         if not file:
             return func.HttpResponse(
-                "No file uploaded in 'file' field.",
+                json.dumps({"error": "Missing file upload"}),
+                mimetype="application/json",
                 status_code=400
             )
 
-        # Save file temporarily
+        # 3. Save uploaded file
         file_path = f"/tmp/{file.filename}"
         with open(file_path, "wb") as f:
             f.write(file.read())
 
-        logging.info(f"Received file: {file.filename}, category: {category}")
+        logging.info(f"Saved uploaded file at {file_path}")
 
-        # All prompts including NEW restroom check
-        prompts = {
-            "dresscode": (
-                "From this image validate the dress code: "
-                "shirt: black or white, pant: black, shoe: must be there (colour optional), "
-                "beards: No. If criteria not met, say dress code is inappropriate "
-                "and give rating score based on the criteria."
-            ),
+        # 4. Generate the correct prompt
+        prompt = build_prompt(category)
 
-            "dustbin": (
-                "Check whether there is a dustbin in the image. "
-                "If dustbin is present validate if it is clean or not clean "
-                "and give a score. Check for poly cover inside and if it is not overfilled."
-            ),
+        # 5. Run AI model (Moondream via Ollama)
+        ai_result = run_moondream_inference(prompt, file_path)
 
-            "lightscheck": (
-                "Check whether all the lights in the image are ON or OFF. "
-                "If ON, give the score. If not, mention which lights are off."
-            ),
-
-            "floorcheck": (
-                "From the image, check whether the floor is clean. "
-                "Verify if the floor is free from hair, stains, dust, marks or spill areas. "
-                "If you find any stains or hair, list them clearly. "
-                "Give an overall cleanliness rating from 1 to 10."
-            ),
-
-            "nailpolishtray": (
-                "Check whether all nail polish bottles are placed properly inside a plastic box or tray. "
-                "If arranged well, give a rating. If not arranged properly, describe what you see clearly."
-            ),
-
-            "shampoobottles": (
-                "Check whether shampoo bottles are placed neatly. "
-                "Ensure there are no stains, spill overs, or messy surroundings. "
-                "Give a rating for arrangement and cleanliness. "
-                "If not neat, explain what you observe and provide improvement suggestions."
-            ),
-
-            "restroomcheck": (
-                "Check whether the rest room is clean or not and free from stains and hair. "
-                "Verify if the wash basin is clean, if handwash is available, and "
-                "if a room freshener is present. List any missing items. "
-                "Finally give an overall rating based on all criteria."
-            ),
-        }
-
-        prompt = prompts.get(category, "")
-
-        image_url = f"{file_path}"
-
-        gemma_result = run_gemma_inference(image_url, prompt)
-
-        response_payload = {
+        # 6. Build final response for frontend
+        final_payload = {
             "filename": file.filename,
             "category": category,
-            "status": "success" if "error" not in gemma_result else "error",
-            "result": gemma_result
+            "status": "success",
+            "result": ai_result
         }
 
-        return func.HttpResponse(json.dumps(response_payload), mimetype="application/json")
+        return func.HttpResponse(
+            json.dumps(final_payload),
+            mimetype="application/json",
+            status_code=200
+        )
 
     except Exception as e:
-        logging.exception("Function execution failed")
+        logging.exception("Function crashed unexpectedly")
         return func.HttpResponse(
             json.dumps({"error": str(e)}),
             mimetype="application/json",
             status_code=500
         )
+
+
+# ===============================================
+# CATEGORY PROMPTS (ALL 7 CATEGORIES)
+# ===============================================
+def build_prompt(category):
+
+    prompts = {
+        "dresscode": """
+Analyze employee dress code from image:
+- Shirt must be black or white
+- Pants must be black
+- Shoes must be present
+- Beard should not be present
+List violations and give rating.
+Return JSON only.
+""",
+
+        "dustbin": """
+Analyze dustbin:
+- Is dustbin visible?
+- Clean or untidy?
+- Poly cover present?
+- Overflowing or OK?
+Return JSON only.
+""",
+
+        "lightscheck": """
+Analyze lighting in the room:
+- Which lights are ON?
+- Which lights are OFF?
+- Any dim or faulty lights?
+Return JSON only.
+""",
+
+        "floorcheck": """
+Analyze floor cleanliness:
+- Hair, dust, stains, spills, marks
+- Is the floor dry and clean?
+Give a cleanliness rating.
+Return JSON only.
+""",
+
+        "nailpolishtray": """
+Analyze nail polish tray:
+- Are bottles arranged neatly?
+- Any bottles missing caps?
+- Any spills or stains?
+Return JSON only.
+""",
+
+        "shampoobottles": """
+Analyze shampoo bottle arrangement:
+- Are bottles arranged properly?
+- Any messy surroundings?
+- Any spills or stains?
+Return JSON only.
+""",
+
+        "restroomcheck": """
+Analyze restroom:
+- Is toilet clean?
+- Is basin clean?
+- Any stains or hair?
+- Handwash available?
+- Room freshener available?
+Give rating.
+Return JSON only.
+"""
+    }
+
+    return prompts.get(category, "General analysis. Return JSON only.")
+
+
+# ===============================================
+#  MOONDREAM INFERENCE (OLLAMA CALL)
+# ===============================================
+def run_moondream_inference(prompt, image_path):
+
+    complete_prompt = f"""
+{prompt}
+
+Image File Path: {image_path}
+
+{JSON_RULE}
+"""
+
+    payload = {
+        "model": "moondream:latest",
+        "prompt": complete_prompt,
+        "stream": False
+    }
+
+    try:
+        response = requests.post(OLLAMA_URL, json=payload)
+    except Exception as e:
+        return {
+            "error": "Unable to reach OLLAMA server",
+            "url": OLLAMA_URL,
+            "details": str(e)
+        }
+
+    # Try parsing clean JSON
+    try:
+        return response.json()
+    except:
+        pass
+
+    # Try fallback parsing
+    try:
+        return json.loads(response.text)
+    except:
+        return {"error": "Model returned invalid JSON", "raw_output": response.text}
