@@ -3,6 +3,8 @@ import azure.functions as func
 import json
 import os
 import requests
+import base64
+import tempfile
 from datetime import datetime
 from adls_utils import upload_json_to_adls
 
@@ -98,19 +100,31 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Azure Function received a request.")
 
     try:
+        # Validate environment variables
+        required_env_vars = ["ADLS_CONNECTION_STRING", "OLLAMA_URL"]
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        if missing_vars:
+            error_msg = f"Missing environment variables: {', '.join(missing_vars)}"
+            logging.error(error_msg)
+            return func.HttpResponse(
+                json.dumps({"filename": "", "category": "", "status": "error", "message": error_msg}),
+                mimetype="application/json",
+                status_code=500
+            )
+
         category = req.params.get("category")
         store_id = req.params.get("store_id")
 
         if not category:
             return func.HttpResponse(
-                json.dumps({"error": "Missing ?category="}),
+                json.dumps({"filename": "", "category": "", "status": "error", "message": "Missing ?category="}),
                 mimetype="application/json",
                 status_code=400
             )
 
         if not store_id:
             return func.HttpResponse(
-                json.dumps({"error": "Missing ?store_id="}),
+                json.dumps({"filename": "", "category": category, "status": "error", "message": "Missing ?store_id="}),
                 mimetype="application/json",
                 status_code=400
             )
@@ -118,35 +132,63 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         file = req.files.get("file")
         if not file:
             return func.HttpResponse(
-                json.dumps({"error": "Missing file upload"}),
+                json.dumps({"filename": "", "category": category, "status": "error", "message": "Missing file upload"}),
                 mimetype="application/json",
                 status_code=400
             )
 
-        # Save temp file
+        logging.info(f"Processing file: {file.filename}, category: {category}, store_id: {store_id}")
+
+        # Read file content
+        file_content = file.read()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp_path = f"/tmp/{file.filename}"
-        with open(tmp_path, "wb") as f:
-            f.write(file.read())
-
-        logging.info(f"Saved uploaded file at {tmp_path}")
-
-        # Build prompt
+        
+        # Build prompt and run AI inference
         prompt = CATEGORY_PROMPTS.get(category, "General analysis. Return JSON only.")
-        ai_result = run_moondream_inference(prompt, tmp_path)
+        ai_result = run_moondream_inference(prompt, file_content)
+        
+        logging.info(f"AI inference result: {ai_result}")
+
+        # Check if AI inference was successful
+        if "error" in ai_result:
+            return func.HttpResponse(
+                json.dumps({
+                    "filename": file.filename,
+                    "category": category,
+                    "status": "error",
+                    "message": ai_result.get("details", "AI inference failed")
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
 
         # Upload to ADLS
-        adls_path = upload_json_to_adls(
-            data=ai_result,
-            category=category,
-            timestamp=timestamp,
-            store_id=store_id
-        )
+        try:
+            adls_path = upload_json_to_adls(
+                data=ai_result,
+                category=category,
+                timestamp=timestamp,
+                store_id=store_id
+            )
+            logging.info(f"Successfully uploaded to ADLS: {adls_path}")
+        except Exception as adls_error:
+            logging.error(f"ADLS upload failed: {str(adls_error)}")
+            return func.HttpResponse(
+                json.dumps({
+                    "filename": file.filename,
+                    "category": category,
+                    "status": "error",
+                    "message": f"ADLS upload failed: {str(adls_error)}"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
 
         response_payload = {
             "filename": file.filename,
             "category": category,
-            "status": "success" if "error" not in ai_result else "fail",
+            "status": "success",
+            "message": "Analysis completed successfully",
             "adls_path": adls_path,
             "result": ai_result
         }
@@ -158,9 +200,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except Exception as e:
-        logging.exception("Function failed")
+        error_msg = f"Function failed: {str(e)}"
+        logging.exception(error_msg)
         return func.HttpResponse(
-            json.dumps({"error": str(e)}),
+            json.dumps({
+                "filename": getattr(file, 'filename', '') if 'file' in locals() else "",
+                "category": category if 'category' in locals() else "",
+                "status": "error",
+                "message": error_msg
+            }),
             mimetype="application/json",
             status_code=500
         )
@@ -169,22 +217,50 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 # ==============================
 # AI INFERENCE
 # ==============================
-def run_moondream_inference(prompt, image_path):
-    complete_prompt = f"""
+def run_moondream_inference(prompt, image_content):
+    try:
+        # Encode image to base64
+        image_base64 = base64.b64encode(image_content).decode('utf-8')
+        
+        complete_prompt = f"""
 {prompt}
-
-Image File Path: {image_path}
 
 {JSON_RULE}
 """
-    payload = {
-        "model": "moondream:latest",
-        "prompt": complete_prompt,
-        "stream": False
-    }
+        
+        payload = {
+            "model": "moondream:latest",
+            "prompt": complete_prompt,
+            "images": [image_base64],
+            "stream": False
+        }
 
-    try:
-        response = requests.post(OLLAMA_URL, json=payload)
-        return response.json()
+        logging.info(f"Sending request to OLLAMA: {OLLAMA_URL}")
+        response = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        
+        if response.status_code != 200:
+            logging.error(f"OLLAMA API error: {response.status_code} - {response.text}")
+            return {"error": "OLLAMA API error", "details": f"Status: {response.status_code}, Response: {response.text}"}
+        
+        result = response.json()
+        logging.info(f"OLLAMA response: {result}")
+        
+        # Extract the response text from OLLAMA's response format
+        if "response" in result:
+            try:
+                # Try to parse the response as JSON
+                ai_response = json.loads(result["response"])
+                return ai_response
+            except json.JSONDecodeError:
+                # If not valid JSON, return the raw response
+                return {"error": "Invalid JSON response from AI", "details": result["response"]}
+        else:
+            return {"error": "Unexpected response format from OLLAMA", "details": str(result)}
+            
+    except requests.exceptions.Timeout:
+        return {"error": "OLLAMA request timeout", "details": "Request took longer than 60 seconds"}
+    except requests.exceptions.ConnectionError:
+        return {"error": "Unable to connect to OLLAMA server", "details": f"Connection failed to {OLLAMA_URL}"}
     except Exception as e:
-        return {"error": "Unable to reach OLLAMA server", "details": str(e)}
+        logging.exception("OLLAMA inference failed")
+        return {"error": "OLLAMA inference failed", "details": str(e)}
