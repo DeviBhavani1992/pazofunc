@@ -17,7 +17,10 @@ st.set_page_config(page_title="Pazo AI Portal", page_icon="✨")
 st.title("✨  Image Analysis Dashboard")
 st.markdown("Upload images for all AI Evaluation Categories below.")
 
-# Categories including new restroomcheck
+# NEW — ASK USER FOR STORE ID
+store_id = st.text_input("🏬 Enter Store ID", "SM-001")
+
+# Categories
 categories = {
     "dresscode": "👔 Dress Code",
     "lightscheck": "💡 Lights Check",
@@ -32,7 +35,7 @@ uploaded_files = {}
 
 st.header("📸 Upload Images")
 
-# Auto-generate uploaders
+# Uploaders
 for key, label in categories.items():
     with st.expander(label):
         uploaded_files[key] = st.file_uploader(
@@ -64,7 +67,12 @@ if st.button("🚀 Submit All for AI Analysis"):
                 "file": (fname, file.getvalue(), file.type)
             }
 
-            endpoint = f"{AZURE_FUNCTION_URL}&category={category}"
+            # UPDATED: Passing store_id also
+            endpoint = (
+                f"{AZURE_FUNCTION_URL}"
+                f"&category={category}"
+                f"&store_id={store_id}"
+            )
 
             try:
                 response = requests.post(endpoint, files=files_payload)
