@@ -8,7 +8,7 @@ import os
 #  OLLAMA ENDPOINT (supports VM + local testing)
 # ===============================================
 # If running INSIDE Azure VM → localhost works
-# If running from LOCAL laptop → set env OLLAMA_URL=http://104.211.66.125:11434/api/generate
+# If running from LOCAL laptop → set env OLLAMA_URL=http://104.211.66.125:21434/api/generate
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 
 # ===============================================
